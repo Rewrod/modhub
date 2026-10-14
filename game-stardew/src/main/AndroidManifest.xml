@@ -1,2 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Package visibility (API 30+): lets PackageInspector see the game and the SMAPI launcher.
+         Merged into the app manifest. -->
+    <queries>
+        <package android:name="com.chucklefish.stardewvalley" />
+        <package android:name="abc.smapi.gameloader" />
+    </queries>
+</manifest>

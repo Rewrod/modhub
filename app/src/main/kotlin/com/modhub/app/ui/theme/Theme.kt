@@ -31,8 +31,8 @@ private val DarkColors = darkColorScheme(
 @Composable
 fun ModHubTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    /** Material You colours on Android 12+. */
-    dynamicColor: Boolean = false,
+    /** Material You colours on Android 12+; below that, the farm-green/wood brand scheme. */
+    dynamicColor: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     val colors = when {

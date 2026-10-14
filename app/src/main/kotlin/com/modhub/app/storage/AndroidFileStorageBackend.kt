@@ -1,5 +1,8 @@
 package com.modhub.app.storage
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Environment
 import com.modhub.core.storage.FileStorageBackend
@@ -29,9 +32,18 @@ class AndroidFileStorageBackend : FileStorageBackend(File("/")) {
         val externalStorageRoot: StoragePath
             get() = StoragePath.of(Environment.getExternalStorageDirectory().absolutePath)
 
-        /** All-files access granted (always true below API 30, where legacy permissions apply). */
-        fun hasAllFilesAccess(): Boolean =
-            Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
+        /**
+         * Broad shared-storage access: All files access on API 30+; on API 26-29 the legacy
+         * WRITE_EXTERNAL_STORAGE runtime permission (checked only when [context] is given,
+         * otherwise assumed granted).
+         */
+        fun hasAllFilesAccess(context: Context? = null): Boolean =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Environment.isExternalStorageManager()
+            } else {
+                context == null || context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                    PackageManager.PERMISSION_GRANTED
+            }
 
         /** Paths that no File/SAF backend can reach on API 30+ (need Shizuku/root). */
         fun isRestrictedPath(path: StoragePath, externalRoot: StoragePath = externalStorageRoot): Boolean {

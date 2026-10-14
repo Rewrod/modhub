@@ -19,6 +19,9 @@ datastore = "1.1.1"
 documentfile = "1.0.1"
 room = "2.6.1"
 
+# Images
+coil = "2.7.0"
+
 # DI
 hilt = "2.53.1"
 hiltNavigationCompose = "1.2.0"
@@ -64,6 +67,9 @@ androidx-compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling
 androidx-compose-ui-test-manifest = { module = "androidx.compose.ui:ui-test-manifest" }
 androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
 androidx-compose-material-icons-core = { module = "androidx.compose.material:material-icons-core" }
+
+# Images
+coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coil" }
 
 # Hilt
 hilt-android = { module = "com.google.dagger:hilt-android", version.ref = "hilt" }

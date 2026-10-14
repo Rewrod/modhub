@@ -46,7 +46,7 @@ class StorageBackendProvider @Inject constructor(
                     StorageChoice(shizukuBackend, "Android/data path: using Shizuku", true)
                 restricted ->
                     StorageChoice(fileBackend, "Android/data path needs Shizuku (not available)", false)
-                AndroidFileStorageBackend.hasAllFilesAccess() ->
+                AndroidFileStorageBackend.hasAllFilesAccess(context) ->
                     StorageChoice(fileBackend, "Direct file access", true)
                 saf != null ->
                     StorageChoice(saf, "Granted SAF folder", true)
@@ -57,13 +57,25 @@ class StorageBackendProvider @Inject constructor(
     }
 
     /** Builds the [GameContext] a plugin call needs, resolving overrides and storage mode. */
-    suspend fun gameContext(plugin: GamePlugin): GameContext {
+    suspend fun gameContext(plugin: GamePlugin): GameContext = resolve(plugin).context
+
+    /**
+     * Like [gameContext], but also returns the [StorageChoice] (backend + human-readable reason)
+     * and the target path it was chosen for, so the UI can explain storage problems.
+     */
+    suspend fun resolve(plugin: GamePlugin): ResolvedStorage {
         val game = settings.currentGameSettings(plugin.id)
         val mode = settings.current().storageMode
         val ext = AndroidFileStorageBackend.externalStorageRoot
         val probe = GameContext(fileBackend, packages, game.modsPathOverride, ext)
-        val target = game.modsPathOverride ?: plugin.defaultModsDirectories(probe).firstOrNull() ?: ext
+        val target = game.modsPathOverride
+            ?: runCatching { plugin.modsDirectory(probe) }.getOrNull()
+            ?: plugin.defaultModsDirectories(probe).firstOrNull()
+            ?: ext
         val choice = choose(target, mode, game)
-        return GameContext(choice.backend, packages, game.modsPathOverride, ext)
+        return ResolvedStorage(GameContext(choice.backend, packages, game.modsPathOverride, ext), choice, target)
     }
 }
+
+/** Result of [StorageBackendProvider.resolve]. */
+data class ResolvedStorage(val context: GameContext, val choice: StorageChoice, val target: StoragePath)

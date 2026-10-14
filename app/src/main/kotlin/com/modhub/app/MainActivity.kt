@@ -20,9 +20,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        handleIntent(intent)
+        // Only on a fresh start: after a configuration change the activity is recreated with
+        // the same launch intent, and the link must not start a second download.
+        if (savedInstanceState == null) handleIntent(intent)
         setContent {
-            ModHubTheme {
+            ModHubTheme(dynamicColor = true) {
                 ModHubNavGraph(
                     pendingNxmLink = pendingNxmLink.value,
                     onNxmLinkConsumed = { pendingNxmLink.value = null },
@@ -33,6 +35,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleIntent(intent)
     }
 

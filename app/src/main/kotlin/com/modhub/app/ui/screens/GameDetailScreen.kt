@@ -30,6 +30,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -57,6 +58,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -67,6 +69,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.modhub.app.domain.DependencyIssue
 import com.modhub.app.domain.GameSnapshot
+import com.modhub.app.domain.LegacyMods
 import com.modhub.app.domain.ModRepository
 import com.modhub.app.domain.describe
 import com.modhub.app.platform.LaunchTarget
@@ -97,6 +100,8 @@ fun GameDetailScreen(
     val busy by viewModel.busy.collectAsStateWithLifecycle()
     val launchTarget by viewModel.launchTarget.collectAsStateWithLifecycle()
     val installing by viewModel.installInProgress.collectAsStateWithLifecycle()
+    val launcherDownloading by viewModel.launcherDownloadRunning.collectAsStateWithLifecycle()
+    val migrationDismissed by viewModel.migrationDismissed.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
 
@@ -141,6 +146,7 @@ fun GameDetailScreen(
     }
 
     var confirmUninstall by remember { mutableStateOf<InstalledMod?>(null) }
+    var confirmMigration by remember { mutableStateOf<LegacyMods?>(null) }
     var fabMenu by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -153,7 +159,7 @@ fun GameDetailScreen(
                         IconButton(onClick = viewModel::onPlay, enabled = !installing) {
                             Icon(
                                 Icons.Filled.PlayArrow,
-                                contentDescription = if (target.modded) "Play (modded)" else "Play (unmodded)",
+                                contentDescription = playLabel(target),
                             )
                         }
                     }
@@ -231,6 +237,33 @@ fun GameDetailScreen(
                         onOpenUrl = { openUrl(context, it) },
                     )
                 }
+                if (snap.status.launcherNeeded) {
+                    item(key = "launcher") {
+                        LauncherCard(
+                            problem = snap.status.bridgeProblem,
+                            downloading = launcherDownloading,
+                            onInstall = viewModel::installLauncher,
+                        )
+                    }
+                }
+                val legacy = snap.legacyMods
+                if (legacy != null && snap.status.bridgeActive && !migrationDismissed) {
+                    item(key = "migrate") {
+                        NoticeCard(
+                            title = "${legacy.count} ${if (legacy.count == 1) "mod" else "mods"} found in the old folder",
+                            body = "${legacy.folder} isn't read by ModHub Launcher. Move them into the launcher so SMAPI " +
+                                "loads them: ${legacy.folderNames.take(5).joinToString()}" +
+                                if (legacy.count > 5) " and ${legacy.count - 5} more." else ".",
+                            tone = ChipTone.NEUTRAL,
+                            actions = {
+                                TextButton(onClick = { confirmMigration = legacy }, enabled = !installing) {
+                                    Text("Move them into the launcher")
+                                }
+                                TextButton(onClick = viewModel::dismissMigration) { Text("Not now") }
+                            },
+                        )
+                    }
+                }
                 if (snap.status.restrictedPath) {
                     item(key = "restricted") {
                         NoticeCard(
@@ -296,6 +329,55 @@ fun GameDetailScreen(
             dismissButton = { TextButton(onClick = { confirmUninstall = null }) { Text("Cancel") } },
         )
     }
+
+    confirmMigration?.let { legacy ->
+        var deleteOriginals by remember { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { confirmMigration = null },
+            title = { Text("Move ${legacy.count} ${if (legacy.count == 1) "mod" else "mods"} into ModHub Launcher?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("ModHub copies each folder from ${legacy.folder} into the launcher's Mods folder. Folders the launcher already has are skipped.")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = deleteOriginals, onCheckedChange = { deleteOriginals = it })
+                        Text("Delete the old copies afterwards")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmMigration = null
+                    viewModel.migrateLegacyMods(deleteOriginals)
+                }) { Text("Move") }
+            },
+            dismissButton = { TextButton(onClick = { confirmMigration = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** Shown while the game's loader bridge is missing or unusable. */
+@Composable
+private fun LauncherCard(problem: String?, downloading: Boolean, onInstall: () -> Unit) {
+    NoticeCard(
+        title = if (problem != null) "ModHub Launcher can't be used" else "Install ModHub Launcher",
+        body = problem ?: (
+            "SMAPI Launcher only loads mods from its private folder, which other apps can't reach on Android 11+. " +
+                "ModHub Launcher is the same launcher with a bridge for ModHub. It installs as an update over " +
+                "SMAPI Launcher and keeps SMAPI and your saves."
+            ),
+        tone = if (problem != null) ChipTone.ERROR else ChipTone.WARN,
+        actions = {
+            Button(onClick = onInstall, enabled = !downloading) {
+                Text(if (downloading) "Downloading..." else if (problem != null) "Reinstall ModHub Launcher" else "Install ModHub Launcher")
+            }
+        },
+    )
+}
+
+private fun playLabel(target: LaunchTarget): String = when {
+    target.needsLoaderSetup -> "Set up SMAPI in launcher"
+    target.modded -> "Play (modded)"
+    else -> "Play (unmodded)"
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -318,7 +400,11 @@ private fun GameHeader(
             launchTarget?.let { PlayButton(it, installing, onPlay) }
             d.gameVersion?.let { Text("Game version $it", style = MaterialTheme.typography.bodySmall) }
             Text(
-                "Mods folder: ${status.target}" + if (status.modsPathOverride != null) " (custom)" else "",
+                if (status.bridgeActive) {
+                    "Mods folder: ${status.bridge?.modsPath ?: status.target} (inside ModHub Launcher)"
+                } else {
+                    "Mods folder: ${status.target}" + if (status.modsPathOverride != null) " (custom)" else ""
+                },
                 style = MaterialTheme.typography.bodySmall,
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
@@ -337,15 +423,21 @@ private fun GameHeader(
                     TextButton(onClick = { onOpenUrl(url) }) { Text("Get ${missing.requirement.name}") }
                 }
             }
-            val storageOk = status.storage.usable && d.modsDirectoryAccessible
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (!storageOk && !status.restrictedPath && !status.hasAllFilesAccess) {
-                    FilledTonalButton(onClick = onAllFilesAccess) {
-                        Icon(Icons.Filled.Build, contentDescription = null)
-                        Text("Fix storage access", Modifier.padding(start = 8.dp))
+            d.loaders.filterIsInstance<LoaderStatus.Outdated>().forEach { outdated ->
+                outdated.hint?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            }
+            // With the bridge, storage is the launcher's own folder: nothing to grant or pick.
+            if (!status.bridgeActive) {
+                val storageOk = status.storage.usable && d.modsDirectoryAccessible
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (!storageOk && !status.restrictedPath && !status.hasAllFilesAccess) {
+                        FilledTonalButton(onClick = onAllFilesAccess) {
+                            Icon(Icons.Filled.Build, contentDescription = null)
+                            Text("Fix storage access", Modifier.padding(start = 8.dp))
+                        }
                     }
+                    OutlinedButton(onClick = onChooseFolder) { Text("Choose mods folder") }
                 }
-                OutlinedButton(onClick = onChooseFolder) { Text("Choose mods folder") }
             }
             if (status.modsPathOverride != null) {
                 TextButton(onClick = onClearOverride) { Text("Use the default folder again") }
@@ -359,7 +451,7 @@ private fun GameHeader(
 private fun PlayButton(target: LaunchTarget, installing: Boolean, onPlay: () -> Unit) {
     val content: @Composable () -> Unit = {
         Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
-        Text(if (target.modded) "Play (modded)" else "Play (unmodded)", Modifier.padding(start = ButtonDefaults.IconSpacing))
+        Text(playLabel(target), Modifier.padding(start = ButtonDefaults.IconSpacing))
     }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         if (target.modded) {
@@ -369,7 +461,10 @@ private fun PlayButton(target: LaunchTarget, installing: Boolean, onPlay: () -> 
         }
         val hint = when {
             installing -> "Finish installing first"
-            target.modded -> "Starts ${target.label}, which loads your mods"
+            target.needsLoaderSetup -> "Opens ${target.label}. Install SMAPI there (\"Install SMAPI From Zip\"), then come back"
+            target.modded && target.autoStart -> "Starts the game through ${target.label} with your mods"
+            target.modded -> "Starts ${target.label}. It only loads mods from its own folder; install ModHub Launcher " +
+                "so the mods ModHub installs load too"
             else -> "Mod loader not found; mods won't load"
         }
         Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

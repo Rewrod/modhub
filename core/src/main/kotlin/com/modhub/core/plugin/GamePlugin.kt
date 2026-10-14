@@ -21,6 +21,20 @@ interface PackageInspector {
 }
 
 /**
+ * What a mod loader's companion app reports over its bridge (e.g. ModHub Launcher's
+ * ContentProvider, docs/BRIDGE.md). Plain data so `:core` stays free of Android; the app
+ * fills it in when [GamePlugin.loaderBridgeAuthority] resolves on the device.
+ */
+data class LoaderBridgeInfo(
+    val launcherVersion: String?,
+    /** The loader (e.g. SMAPI) is set up inside the launcher. */
+    val smapiInstalled: Boolean,
+    val smapiVersion: String?,
+    /** The launcher can see the game it loads. */
+    val gameInstalled: Boolean,
+)
+
+/**
  * Everything a [GamePlugin] call needs from the outside world. Built by the app per
  * call (cheap), so settings changes (path override, storage mode) take effect at once.
  */
@@ -32,6 +46,11 @@ data class GameContext(
     val modsDirectoryOverride: StoragePath? = null,
     /** Shared external storage root, normally `/storage/emulated/0`. */
     val externalStorageRoot: StoragePath = StoragePath.of("/storage/emulated/0"),
+    /**
+     * Set when the game's loader bridge is active: [storage] then talks to the launcher's own
+     * mods folder and [modsDirectoryOverride] points at it. Null = legacy path-based storage.
+     */
+    val loaderBridge: LoaderBridgeInfo? = null,
 )
 
 /**
@@ -56,6 +75,12 @@ interface GamePlugin {
      * as a "modded" launch. All of them must be in the plugin's manifest `<queries>`.
      */
     val launchPackageNames: List<String> get() = packageNames
+
+    /**
+     * Authority of a loader launcher's bridge ContentProvider (docs/BRIDGE.md), if the game has
+     * one. When it resolves on the device the app manages mods through it instead of a path.
+     */
+    val loaderBridgeAuthority: String? get() = null
 
     /** Loaders/prerequisites (e.g. SMAPI for Android). Empty if mods work without one. */
     val loaderRequirements: List<LoaderRequirement>

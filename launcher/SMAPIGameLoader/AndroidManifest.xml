@@ -8,7 +8,10 @@
 	<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
 
 	<uses-feature android:glEsVersion="0x00020000" android:required="true" />
-	<application android:label="SMAPI Launcher"></application>
+	<!-- ModHub bridge: only apps signed with the same key (ModHub) may use ModHubBridgeProvider.
+	     The <provider> element is generated from the [ContentProvider] attribute on ModHubBridgeProvider. -->
+	<permission android:name="abc.smapi.gameloader.permission.MODHUB_BRIDGE" android:protectionLevel="signature" />
+	<application android:label="ModHub Launcher"></application>
 	<queries>
 		<package android:name="com.chucklefish.stardewvalley" />
 		<package android:name="com.chucklefish.stardewvalleysamsung" />

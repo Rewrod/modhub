@@ -4,6 +4,8 @@ import com.modhub.core.install.ByteArrayModArchive
 import com.modhub.core.model.LoaderStatus
 import com.modhub.core.model.ModId
 import com.modhub.core.model.ModSourceRef
+import com.modhub.core.plugin.GameContext
+import com.modhub.core.plugin.LoaderBridgeInfo
 import com.modhub.core.storage.StorageException
 import com.modhub.core.install.InstallProgress
 import com.modhub.core.install.ModArchive
@@ -64,20 +66,78 @@ class StardewPluginTest : StardewTestBase() {
     }
 
     @Test
-    fun detectReady() = runBlocking<Unit> {
+    fun detectLegacyFolderReadyButOfficialLauncherIsOutdated() = runBlocking<Unit> {
         storage.mkdirs(modsDir)
         val d = plugin.detect(
-            context(mapOf(StardewPlugin.PACKAGE_GAME to "1.6.15.1", StardewPlugin.PACKAGE_SMAPI_LAUNCHER to "1.2")),
+            context(mapOf(StardewPlugin.PACKAGE_GAME to "1.6.15.1", StardewPlugin.PACKAGE_SMAPI_LAUNCHER to "1.1.7")),
         )
         assertTrue(d.gameInstalled)
         assertEquals("1.6.15.1", d.gameVersion)
         assertEquals(StardewPlugin.PACKAGE_GAME, d.installedPackage)
-        assertEquals(LoaderStatus.Installed(StardewPlugin.SMAPI_REQUIREMENT, "1.2"), d.loaders.single())
+        // Official SMAPI Launcher, no bridge: it never reads the folder ModHub writes to.
+        assertEquals(
+            LoaderStatus.Outdated(StardewPlugin.SMAPI_REQUIREMENT, "1.1.7", StardewPlugin.LAUNCHER_REPLACE_HINT),
+            d.loaders.single(),
+        )
         assertEquals(modsDir, d.modsDirectory)
         assertTrue(d.modsDirectoryAccessible)
-        assertTrue(d.ready)
-        assertTrue(d.notes.isEmpty(), d.notes.toString())
+        assertFalse(d.ready)
+        assertEquals(listOf(StardewPlugin.NO_BRIDGE_NOTE), d.notes)
     }
+
+    @Test
+    fun detectNoLauncherIsMissingWithNoBridgeNote() = runBlocking<Unit> {
+        val d = plugin.detect(context(mapOf(StardewPlugin.PACKAGE_GAME to "1.6.15.1")))
+        assertEquals(LoaderStatus.Missing(StardewPlugin.SMAPI_REQUIREMENT, StardewPlugin.SMAPI_INSTALL_HINT), d.loaders.single())
+        assertTrue(d.notes.any { "install ModHub Launcher so ModHub can manage them" in it }, d.notes.toString())
+    }
+
+    // ------------------------------------------------------------ detect (bridge)
+
+    @Test
+    fun bridgeReady() = runBlocking<Unit> {
+        val bridge = LoaderBridgeInfo("1.1.7-modhub.1", smapiInstalled = true, smapiVersion = "4.3.2", gameInstalled = true)
+        val ctx = bridgeContext(bridge, mapOf(StardewPlugin.PACKAGE_GAME to "1.6.15.1", StardewPlugin.PACKAGE_SMAPI_LAUNCHER to "1.1.7-modhub.1"))
+        val d = plugin.detect(ctx)
+        assertEquals(LoaderStatus.Installed(StardewPlugin.SMAPI_REQUIREMENT, "4.3.2"), d.loaders.single())
+        assertEquals(StardewPlugin.BRIDGE_MODS_DIR, d.modsDirectory)
+        assertTrue(d.modsDirectoryAccessible)
+        // The bridge's Mods root is created on detection so the first install works.
+        assertTrue(storage.isDirectory(StardewPlugin.BRIDGE_MODS_DIR))
+        assertTrue(d.ready)
+        assertEquals(listOf("${StardewPlugin.BRIDGE_MANAGED_NOTE} (1.1.7-modhub.1)."), d.notes)
+        assertFalse(d.notes.any { it == StardewPlugin.NO_BRIDGE_NOTE })
+    }
+
+    @Test
+    fun bridgeWithoutSmapiIsMissingWithLauncherHint() = runBlocking<Unit> {
+        val bridge = LoaderBridgeInfo(null, smapiInstalled = false, smapiVersion = null, gameInstalled = true)
+        val d = plugin.detect(bridgeContext(bridge))
+        val loader = assertIs<LoaderStatus.Missing>(d.loaders.single())
+        assertTrue("Install SMAPI inside ModHub Launcher" in loader.hint.orEmpty())
+        // Our package lookup found nothing, but the launcher sees the game.
+        assertTrue(d.gameInstalled)
+        assertFalse(d.ready)
+        assertTrue(d.notes.any { it.startsWith(StardewPlugin.BRIDGE_MANAGED_NOTE) })
+    }
+
+    @Test
+    fun bridgeModeInstallsListsAndTogglesUnderMods() = runBlocking<Unit> {
+        // A legacy folder must be ignored once the bridge is active.
+        write(modsDir.resolve("Old/manifest.json"), manifestJson("me.old"))
+        val ctx = bridgeContext(LoaderBridgeInfo("1", true, "4.3.2", true))
+        assertEquals(listOf(StardewPlugin.BRIDGE_MODS_DIR), plugin.defaultModsDirectories(ctx))
+        val zip = zipOf("Foo/manifest.json" to manifestJson("me.foo", "Foo"))
+        val installed = plugin.installMod(ctx, ByteArrayModArchive("foo.zip", zip))
+        assertEquals(StardewPlugin.BRIDGE_MODS_DIR.resolve("Foo"), installed.single().location)
+        val listed = plugin.listInstalled(ctx)
+        assertEquals(listOf("me.foo"), listed.map { it.id })
+        val disabled = plugin.setEnabled(ctx, listed.single(), false)
+        assertEquals(StardewPlugin.BRIDGE_MODS_DIR.resolve(".Foo"), disabled.location)
+    }
+
+    private fun bridgeContext(bridge: LoaderBridgeInfo, packages: Map<String, String?> = emptyMap()) =
+        GameContext(storage, FakePackages(packages), StardewPlugin.BRIDGE_MODS_DIR, ext, loaderBridge = bridge)
 
     @Test
     fun detectOldGameAndRestrictedDir() = runBlocking<Unit> {

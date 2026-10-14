@@ -26,8 +26,22 @@
         tools:ignore="ScopedStorage" />
     <!-- TODO(shizuku): Shizuku's provider/permission entries go here once the dependency is added. -->
 
+    <!-- ModHub Launcher bridge (docs/BRIDGE.md): signature-level permission declared by the
+         launcher (abc.smapi.gameloader). Granted only when both APKs share a signing key. -->
+    <uses-permission android:name="abc.smapi.gameloader.permission.MODHUB_BRIDGE" />
+    <!-- "Install ModHub Launcher": hands the downloaded APK to the system installer. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- Game plugins declare <queries> for their packages in their own manifests;
-         they are merged in at build time (needed for package visibility on API 30+). -->
+         they are merged in at build time (needed for package visibility on API 30+).
+         The bridge provider must be visible too, or resolveContentProvider()/call() fail on 11+. -->
+    <queries>
+        <provider android:authorities="abc.smapi.gameloader.modhub" />
+        <!-- Settings > Developer > Export game assemblies reads the game's APKs; the Play Store
+             package is also declared by :game-stardew, the Galaxy Store one only here. -->
+        <package android:name="com.chucklefish.stardewvalley" />
+        <package android:name="com.chucklefish.stardewvalleysamsung" />
+    </queries>
 
     <application
         android:name=".ModHubApplication"
@@ -60,5 +74,17 @@
                 <data android:scheme="nxm" />
             </intent-filter>
         </activity>
+
+        <!-- Shares the downloaded ModHub Launcher APK (cacheDir/launcher) with the package installer.
+             Authority must match LauncherInstaller.AUTHORITY_SUFFIX. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

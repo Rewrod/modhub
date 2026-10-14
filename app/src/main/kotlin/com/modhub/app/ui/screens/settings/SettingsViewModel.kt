@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import com.modhub.app.data.settings.GameSettings
 import com.modhub.app.data.settings.SettingsRepository
 import com.modhub.app.data.settings.StorageMode
+import com.modhub.app.devtools.GameAssemblyExporter
+import com.modhub.app.devtools.InstalledGamePackage
 import com.modhub.app.domain.ModRepository
 import com.modhub.app.domain.describe
 import com.modhub.app.storage.AndroidFileStorageBackend
@@ -35,6 +37,14 @@ sealed interface KeyCheck {
     data class Invalid(val message: String) : KeyCheck
 }
 
+/** Settings > Developer > "Export game assemblies" progress. */
+sealed interface AssemblyExport {
+    data object Idle : AssemblyExport
+    data class Running(val packageName: String, val step: String) : AssemblyExport
+    data class Done(val packageName: String, val fileName: String) : AssemblyExport
+    data class Failed(val packageName: String, val message: String) : AssemblyExport
+}
+
 data class GameFolderRow(val gameId: GameId, val name: String, val settings: GameSettings)
 
 @HiltViewModel
@@ -43,6 +53,7 @@ class SettingsViewModel @Inject constructor(
     private val settings: SettingsRepository,
     private val repository: ModRepository,
     private val storageProvider: StorageBackendProvider,
+    private val assemblyExporter: GameAssemblyExporter,
     sources: SourceRegistry,
 ) : ViewModel() {
 
@@ -75,12 +86,39 @@ class SettingsViewModel @Inject constructor(
 
     val shizukuAvailable: Boolean get() = storageProvider.shizukuBackend.isAvailable()
 
+    private val _gamePackages = MutableStateFlow(assemblyExporter.installedPackages())
+    /** Installed Stardew Valley packages the developer export can read. */
+    val gamePackages: StateFlow<List<InstalledGamePackage>> = _gamePackages.asStateFlow()
+
+    private val _assemblyExport = MutableStateFlow<AssemblyExport>(AssemblyExport.Idle)
+    val assemblyExport: StateFlow<AssemblyExport> = _assemblyExport.asStateFlow()
+
     init {
         viewModelScope.launch { _keyDraft.value = settings.nexusApiKey.first().orEmpty() }
     }
 
     fun onResume() {
         _allFilesAccess.value = AndroidFileStorageBackend.hasAllFilesAccess(appContext)
+        _gamePackages.value = assemblyExporter.installedPackages()
+    }
+
+    /** Extracts the game's .NET assemblies into a zip and opens the share sheet. */
+    fun exportGameAssemblies(packageName: String) {
+        if (_assemblyExport.value is AssemblyExport.Running) return
+        _assemblyExport.value = AssemblyExport.Running(packageName, "Starting")
+        viewModelScope.launch {
+            _assemblyExport.value = try {
+                val zip = assemblyExporter.export(packageName) { step ->
+                    _assemblyExport.value = AssemblyExport.Running(packageName, step)
+                }
+                assemblyExporter.share(zip)
+                AssemblyExport.Done(packageName, zip.name)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AssemblyExport.Failed(packageName, describe(e))
+            }
+        }
     }
 
     fun setKeyDraft(value: String) {

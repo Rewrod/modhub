@@ -1,6 +1,7 @@
 using System;
 using _Microsoft.Android.Resource.Designer;
 using Android.App;
+using Android.Content;
 using Android.Content.PM;
 using Android.OS;
 using Android.Widget;
@@ -13,7 +14,7 @@ using System.Text;
 namespace SMAPIGameLoader.Launcher;
 
 [Activity(
-    Label = "SMAPI Launcher",
+    Label = "ModHub Launcher",
     MainLauncher = true,
     Theme = "@style/AppTheme",
     AlwaysRetainTaskState = true,
@@ -45,6 +46,55 @@ public class LauncherActivity : AppCompatActivity
 
         //run utils scripts
         ProcessAdbExtras();
+
+        //ModHub: "Play (modded)" sends modhub.autoStart=true.
+        //Only on a fresh create, not when recreated after a config change / process restore.
+        if (savedInstanceState == null)
+            ProcessModHubAutoStart(Intent);
+    }
+
+    //ModHub: LaunchMode.SingleInstance delivers later launches here instead of OnCreate
+    protected override void OnNewIntent(Intent? intent)
+    {
+        base.OnNewIntent(intent);
+        if (intent == null)
+            return;
+
+        Intent = intent;
+        ProcessModHubAutoStart(intent);
+    }
+
+    public const string ModHubAutoStartExtra = "modhub.autoStart";
+
+    /// <summary>
+    ///     ModHub bridge: start the game right away (same path as the Play button).
+    ///     On success EntryGame finishes this activity; on failure the launcher UI stays.
+    /// </summary>
+    private void ProcessModHubAutoStart(Intent? intent)
+    {
+        try
+        {
+            if (intent == null || intent.GetBooleanExtra(ModHubAutoStartExtra, false) == false)
+                return;
+
+            //consume, so this Intent object can't trigger a second start
+            intent.RemoveExtra(ModHubAutoStartExtra);
+
+            if (IsFinishing)
+                return;
+
+            if (SMAPIInstaller.IsInstalled is false)
+            {
+                ToastNotifyTool.Notify("Install SMAPI first");
+                return;
+            }
+
+            OnClickStartGame();
+        }
+        catch (Exception ex)
+        {
+            ToastNotifyTool.Notify("Error: ModHub auto start: " + ex.Message);
+        }
     }
 
     private void SetDarkMode()
@@ -157,6 +207,7 @@ public class LauncherActivity : AppCompatActivity
             launcherInfoLines.AppendLine("Your Game Version: " + StardewApkTool.CurrentGameVersion);
             launcherInfoLines.AppendLine("Discord: Stardew SMAPI Thailand");
             launcherInfoLines.AppendLine("Developer: NRTnarathip, Eky-Team");
+            launcherInfoLines.AppendLine("ModHub Launcher: modified build of SMAPILoader (GPL-3.0)");
 
             FindViewById<TextView>(ResourceConstant.Id.launcherInfoTextView).Text = launcherInfoLines.ToString();
 

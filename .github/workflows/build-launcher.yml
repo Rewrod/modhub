@@ -1,0 +1,139 @@
+name: Build ModHub Launcher
+
+# build-apk.yml deletes and re-creates the `latest` release on every push to main.
+# If this ran on `push` in parallel, it could upload the launcher before that delete and
+# lose it. So it runs after "Build debug APK" finishes (that workflow runs on every push
+# to main, launcher/** changes included) and re-attaches ModHub-Launcher.apk.
+on:
+  workflow_run:
+    workflows: ["Build debug APK"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-launcher
+  cancel-in-progress: true
+
+env:
+  PROJECT: launcher/SMAPIGameLoader/SMAPIGameLoader.csproj
+  # Proprietary game DLLs (MonoGame.Framework.dll, StardewValley.dll, StardewValley.GameData.dll)
+  # are not in the repo. The csproj expects them at <repo>/SMAPI-Android-1.6/src/DependenciesDll/.
+  # Provide a zip with those three files via the GAME_DLLS_URL secret (e.g. an asset in a
+  # private repo/release); GAME_DLLS_TOKEN is optional and sent as a Bearer token.
+  GAME_DLLS_DIR: SMAPI-Android-1.6/src/DependenciesDll
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Fetch game reference DLLs
+        id: gamedlls
+        env:
+          GAME_DLLS_URL: ${{ secrets.GAME_DLLS_URL }}
+          GAME_DLLS_TOKEN: ${{ secrets.GAME_DLLS_TOKEN }}
+        run: |
+          if [ -z "$GAME_DLLS_URL" ]; then
+            echo "::warning::GAME_DLLS_URL secret is not set; cannot build the launcher (needs StardewValley.dll, StardewValley.GameData.dll, MonoGame.Framework.dll). Skipping."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p "$GAME_DLLS_DIR" "$RUNNER_TEMP/gamedlls"
+          if [ -n "$GAME_DLLS_TOKEN" ]; then
+            curl -fsSL -H "Authorization: Bearer $GAME_DLLS_TOKEN" -H "Accept: application/octet-stream" \
+              -o "$RUNNER_TEMP/gamedlls.zip" "$GAME_DLLS_URL"
+          else
+            curl -fsSL -o "$RUNNER_TEMP/gamedlls.zip" "$GAME_DLLS_URL"
+          fi
+          unzip -o -j "$RUNNER_TEMP/gamedlls.zip" '*.dll' -d "$RUNNER_TEMP/gamedlls"
+          for f in MonoGame.Framework.dll StardewValley.dll StardewValley.GameData.dll; do
+            test -f "$RUNNER_TEMP/gamedlls/$f" || { echo "::error::$f missing from GAME_DLLS_URL zip"; exit 1; }
+            cp "$RUNNER_TEMP/gamedlls/$f" "$GAME_DLLS_DIR/$f"
+          done
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v5
+        if: steps.gamedlls.outputs.ready == 'true'
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-dotnet@v4
+        if: steps.gamedlls.outputs.ready == 'true'
+        with:
+          global-json-file: launcher/global.json
+
+      - name: Install Android workload and SDK platform
+        if: steps.gamedlls.outputs.ready == 'true'
+        run: |
+          dotnet --info
+          # --skip-manifest-update keeps the workload (and so the Mono runtime pack version)
+          # at what SDK 9.0.312 ships with, matching the patched libmonosgen in SharedLibs/.
+          dotnet workload install android --skip-manifest-update
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" >/dev/null
+
+      - name: Restore
+        if: steps.gamedlls.outputs.ready == 'true'
+        run: dotnet restore "$PROJECT" -p:RuntimeIdentifiers=android-arm64
+
+      # docs/building.md step 2: SMAPI/Harmony need the custom Mono runtime with access checks removed.
+      - name: Install custom Mono runtime (libmonosgen-2.0.so)
+        if: steps.gamedlls.outputs.ready == 'true'
+        run: |
+          custom=launcher/SharedLibs/native/arm64-v8a/libmonosgen-2.0.so
+          found=0
+          while IFS= read -r so; do
+            echo "patching $so"
+            cp "$custom" "$so"
+            found=1
+          done < <(find "${DOTNET_ROOT:-$HOME/.dotnet}/packs" "$HOME/.nuget/packages" \
+                     -ipath '*runtime.mono.android-arm64*android-arm64/native/libmonosgen-2.0.so' 2>/dev/null)
+          if [ "$found" = 0 ]; then
+            echo "::error::Mono android-arm64 runtime pack not found; cannot install custom libmonosgen"
+            exit 1
+          fi
+          ls -d "${DOTNET_ROOT:-$HOME/.dotnet}"/packs/Microsoft.NETCore.App.Runtime.Mono.android-arm64/* 2>/dev/null || true
+          if ! ls -d "${DOTNET_ROOT:-$HOME/.dotnet}"/packs/Microsoft.NETCore.App.Runtime.Mono.android-arm64/9.0.14 >/dev/null 2>&1; then
+            echo "::warning::Mono runtime pack is not 9.0.14 (the version docs/building.md uses); check the custom libmonosgen matches."
+          fi
+
+      - name: Build APK
+        if: steps.gamedlls.outputs.ready == 'true'
+        run: |
+          dotnet publish "$PROJECT" -c Release -f net9.0-android --no-restore \
+            -p:AndroidPackageFormat=apk \
+            -p:RuntimeIdentifiers=android-arm64 \
+            -p:AndroidSdkDirectory="$ANDROID_HOME" \
+            -p:JavaSdkDirectory="$JAVA_HOME" \
+            -o out/launcher
+          ls -la out/launcher
+          apk=$(find out/launcher -name '*-Signed.apk' | head -n1)
+          test -n "$apk" || { echo "::error::no *-Signed.apk produced"; exit 1; }
+          cp "$apk" ModHub-Launcher.apk
+
+      - uses: actions/upload-artifact@v4
+        if: steps.gamedlls.outputs.ready == 'true'
+        with:
+          name: modhub-launcher-apk
+          path: ModHub-Launcher.apk
+
+      - name: Attach to `latest` release
+        if: steps.gamedlls.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! gh release view latest >/dev/null 2>&1; then
+            gh release create latest \
+              --title "ModHub (latest debug build)" \
+              --notes "Built from commit ${GITHUB_SHA::7}." || true
+          fi
+          gh release upload latest ModHub-Launcher.apk --clobber

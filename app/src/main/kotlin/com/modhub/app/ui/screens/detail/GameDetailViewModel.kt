@@ -14,6 +14,7 @@ import com.modhub.app.domain.describe
 import com.modhub.app.domain.kind
 import com.modhub.app.platform.GameLauncher
 import com.modhub.app.platform.LaunchTarget
+import com.modhub.app.platform.LauncherInstaller
 import com.modhub.app.ui.navigation.Routes
 import com.modhub.core.model.GameId
 import com.modhub.core.model.InstalledMod
@@ -44,6 +45,7 @@ class GameDetailViewModel @Inject constructor(
     private val repository: ModRepository,
     private val downloadManager: DownloadManager,
     private val launcher: GameLauncher,
+    private val launcherInstaller: LauncherInstaller,
 ) : ViewModel() {
 
     val gameId = GameId(savedState.get<String>(Routes.ARG_GAME_ID)?.takeIf { it.isNotBlank() } ?: "unknown")
@@ -82,6 +84,15 @@ class GameDetailViewModel @Inject constructor(
     private val _busy = MutableStateFlow<Set<String>>(emptySet())
     val busy: StateFlow<Set<String>> = _busy.asStateFlow()
 
+    /** True while the launcher APK is downloading (the install button is disabled). */
+    val launcherDownloadRunning: StateFlow<Boolean> = downloads
+        .map { list -> list.any { it.title == LauncherInstaller.TITLE && !it.isFinished } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /** "Not now" on the old-folder migration card (until the screen is left). */
+    private val _migrationDismissed = MutableStateFlow(false)
+    val migrationDismissed: StateFlow<Boolean> = _migrationDismissed.asStateFlow()
+
     private val _messages = Channel<UiMessage>(Channel.BUFFERED)
     val messages: Flow<UiMessage> = _messages.receiveAsFlow()
 
@@ -89,9 +100,19 @@ class GameDetailViewModel @Inject constructor(
         viewModelScope.launch {
             downloadManager.events.filter { it.download.gameId == gameId }.collect { e ->
                 when (e) {
-                    is DownloadEvent.Installed -> {
-                        val names = e.mods.joinToString { it.name }.ifEmpty { e.download.title }
-                        _messages.send(UiMessage("Installed $names"))
+                    is DownloadEvent.Installed -> when {
+                        e.download.title == LauncherInstaller.TITLE -> _messages.send(
+                            UiMessage("Confirm the install in Android's dialog, then come back to ModHub"),
+                        )
+                        e.download.title == ModRepository.MIGRATION_TITLE -> _messages.send(
+                            UiMessage(
+                                if (e.mods.isEmpty()) "Nothing left to move" else "Moved ${e.mods.size} mods into ModHub Launcher",
+                            ),
+                        )
+                        else -> {
+                            val names = e.mods.joinToString { it.name }.ifEmpty { e.download.title }
+                            _messages.send(UiMessage("Installed $names"))
+                        }
                     }
                     is DownloadEvent.Failed -> {
                         val err = e.download.error ?: return@collect
@@ -135,6 +156,22 @@ class GameDetailViewModel @Inject constructor(
         val target = withContext(Dispatchers.IO) { runCatching { launcher.resolve(plugin) }.getOrNull() }
         _launchTarget.value = target
         return target
+    }
+
+    /** Downloads ModHub Launcher and opens the system installer (shown while the bridge is missing). */
+    fun installLauncher() {
+        runCatching { launcherInstaller.install(gameId) }
+            .onFailure { _messages.trySend(UiMessage(describe(it))) }
+    }
+
+    /** Copies the old folder's mods into the launcher; [deleteOriginals] removes each copied original. */
+    fun migrateLegacyMods(deleteOriginals: Boolean) {
+        runCatching { repository.migrateLegacyMods(gameId, deleteOriginals) }
+            .onFailure { _messages.trySend(UiMessage(describe(it))) }
+    }
+
+    fun dismissMigration() {
+        _migrationDismissed.value = true
     }
 
     fun setEnabled(mod: InstalledMod, enabled: Boolean) = runOn(mod) {

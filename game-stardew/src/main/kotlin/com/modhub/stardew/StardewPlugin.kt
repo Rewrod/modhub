@@ -12,6 +12,7 @@ import com.modhub.core.model.LoaderStatus
 import com.modhub.core.model.ModSourceRef
 import com.modhub.core.plugin.GameContext
 import com.modhub.core.plugin.GamePlugin
+import com.modhub.core.plugin.LoaderBridgeInfo
 import com.modhub.core.storage.StorageException
 import com.modhub.core.storage.StoragePath
 import com.modhub.core.util.ZipExtractor
@@ -47,7 +48,11 @@ class StardewPlugin(
 
     override val supportsLoadOrder: Boolean = false
 
+    /** ModHub Launcher's bridge (docs/BRIDGE.md): the only way into the launcher's private Mods folder. */
+    override val loaderBridgeAuthority: String = BRIDGE_AUTHORITY
+
     override fun defaultModsDirectories(context: GameContext): List<StoragePath> {
+        if (context.loaderBridge != null) return listOf(BRIDGE_MODS_DIR)
         val ext = context.externalStorageRoot
         return listOf(
             ext.resolve("StardewValley/Mods"),
@@ -60,11 +65,12 @@ class StardewPlugin(
 
     override suspend fun detect(context: GameContext): GameDetection {
         val packages = context.packages
-        val gameInstalled = runCatching { packages.isInstalled(PACKAGE_GAME) }.getOrDefault(false)
-        val gameVersion = if (gameInstalled) runCatching { packages.versionName(PACKAGE_GAME) }.getOrNull() else null
-        val launcherInstalled = runCatching { packages.isInstalled(PACKAGE_SMAPI_LAUNCHER) }.getOrDefault(false)
-        val launcherVersion =
-            if (launcherInstalled) runCatching { packages.versionName(PACKAGE_SMAPI_LAUNCHER) }.getOrNull() else null
+        val bridge = context.loaderBridge
+        val gamePackageInstalled = runCatching { packages.isInstalled(PACKAGE_GAME) }.getOrDefault(false)
+        // The launcher has its own package visibility; trust it if our lookup came up empty.
+        val gameInstalled = gamePackageInstalled || bridge?.gameInstalled == true
+        val gameVersion =
+            if (gamePackageInstalled) runCatching { packages.versionName(PACKAGE_GAME) }.getOrNull() else null
 
         val notes = mutableListOf<String>()
         if (!gameInstalled) {
@@ -73,31 +79,85 @@ class StardewPlugin(
             notes += "SMAPI for Android needs Stardew Valley $MIN_GAME_VERSION or later; installed: $gameVersion."
         }
 
+        return if (bridge != null) {
+            detectWithBridge(context, bridge, gameInstalled, gameVersion, notes)
+        } else {
+            detectLegacy(context, gameInstalled, gameVersion, notes)
+        }
+    }
+
+    /** ModHub Launcher is installed: SMAPI status comes from the launcher, mods live in its `files/Mods`. */
+    private suspend fun detectWithBridge(
+        context: GameContext,
+        bridge: LoaderBridgeInfo,
+        gameInstalled: Boolean,
+        gameVersion: String?,
+        notes: MutableList<String>,
+    ): GameDetection {
+        val modsDir = runCatching { modsDirectory(context) }.getOrDefault(BRIDGE_MODS_DIR)
+        val storage = context.storage
+        // The launcher creates Mods on first start; creating it early is harmless and lets installs work at once.
+        val accessible = runCatching { storage.isDirectory(modsDir) || storage.mkdirs(modsDir) }.getOrDefault(false)
+
+        val loaderStatus: LoaderStatus = if (bridge.smapiInstalled) {
+            LoaderStatus.Installed(SMAPI_REQUIREMENT, bridge.smapiVersion)
+        } else {
+            LoaderStatus.Missing(SMAPI_REQUIREMENT, BRIDGE_SMAPI_MISSING_HINT)
+        }
+
+        notes += BRIDGE_MANAGED_NOTE + (bridge.launcherVersion?.let { " ($it)." } ?: ".")
+        if (!accessible) notes += "ModHub Launcher did not let ModHub open its Mods folder. Open the launcher once, then refresh."
+
+        return GameDetection(
+            gameInstalled = gameInstalled,
+            installedPackage = if (gameInstalled) PACKAGE_GAME else null,
+            gameVersion = gameVersion,
+            loaders = listOf(loaderStatus),
+            modsDirectory = modsDir,
+            modsDirectoryAccessible = accessible,
+            notes = notes,
+        )
+    }
+
+    /** No bridge: the official SMAPI Launcher (or nothing) is installed; scan the legacy shared paths. */
+    private suspend fun detectLegacy(
+        context: GameContext,
+        gameInstalled: Boolean,
+        gameVersion: String?,
+        notes: MutableList<String>,
+    ): GameDetection {
+        val packages = context.packages
+        val launcherInstalled = runCatching { packages.isInstalled(PACKAGE_SMAPI_LAUNCHER) }.getOrDefault(false)
+        val launcherVersion =
+            if (launcherInstalled) runCatching { packages.versionName(PACKAGE_SMAPI_LAUNCHER) }.getOrNull() else null
+
         val modsDir = runCatching { modsDirectory(context) }.getOrNull()
         val accessible = modsDir != null && runCatching { context.storage.isDirectory(modsDir) }.getOrDefault(false)
 
         val smapiInternal = context.externalStorageRoot.resolve("StardewValley/smapi-internal")
         val smapiFilesPresent = runCatching { context.storage.exists(smapiInternal) }.getOrDefault(false)
         val loaderStatus: LoaderStatus = when {
-            launcherInstalled -> LoaderStatus.Installed(SMAPI_REQUIREMENT, launcherVersion)
+            // The official launcher without our bridge: SMAPI may work, but it never reads the folder ModHub can write.
+            launcherInstalled -> LoaderStatus.Outdated(SMAPI_REQUIREMENT, launcherVersion, LAUNCHER_REPLACE_HINT)
             smapiFilesPresent -> LoaderStatus.Unknown(
                 SMAPI_REQUIREMENT,
-                "SMAPI files were found ($smapiInternal) but the SMAPI Launcher app ($PACKAGE_SMAPI_LAUNCHER) " +
-                    "is not installed. If you use another SMAPI variant (e.g. Cinderbox or a patched APK) this may be fine.",
+                "SMAPI files were found ($smapiInternal) but no SMAPI launcher app ($PACKAGE_SMAPI_LAUNCHER) " +
+                    "is installed. If you use another SMAPI variant (e.g. Cinderbox or a patched APK) this may be fine.",
             )
             else -> LoaderStatus.Missing(SMAPI_REQUIREMENT, SMAPI_INSTALL_HINT)
         }
+
+        notes += NO_BRIDGE_NOTE
 
         if (modsDir != null) {
             val restricted = isRestrictedAppDir(modsDir, context.externalStorageRoot)
             when {
                 accessible -> Unit
                 restricted -> notes += "The mods folder $modsDir is inside Android/data. On Android 11+ other apps " +
-                    "cannot reach it with normal storage permissions or the folder picker; use Shizuku (or root), " +
-                    "or pick a different mods folder in Settings."
+                    "cannot reach it with normal storage permissions or the folder picker. Install ModHub Launcher " +
+                    "(or use Shizuku/root), or pick a different mods folder in Settings."
                 else -> notes += "The mods folder $modsDir does not exist or is not accessible. Grant \"All files " +
-                    "access\" (Android 11+) or pick the folder in Settings. SMAPI creates it the first time it runs; " +
-                    "ModHub will also create it on the first install."
+                    "access\" (Android 11+) or pick the folder in Settings. ModHub creates it on the first install."
             }
         }
 
@@ -375,22 +435,39 @@ class StardewPlugin(
         private const val MAX_MANIFEST_BYTES = 1024 * 1024
         private const val STAGING_PREFIX = ".modhub-staging-"
 
+        /** ModHub Launcher's bridge provider (our fork of SMAPILoader, same package; docs/BRIDGE.md). */
+        const val BRIDGE_AUTHORITY = "abc.smapi.gameloader.modhub"
+        /** Bridge paths are relative to the launcher's files dir; "/Mods" is its `files/Mods`. */
+        val BRIDGE_MODS_DIR: StoragePath = StoragePath.of("/Mods")
+
         val SMAPI_REQUIREMENT = LoaderRequirement(
             id = "smapi-android",
             name = "SMAPI for Android",
             description = "Unofficial community port of SMAPI (not supported by ConcernedApe; still experimental, " +
                 "some mods do not work). Needs a 64-bit device and Stardew Valley $MIN_GAME_VERSION or later " +
-                "from Google Play or the Galaxy Store. Install the SMAPI Launcher app, then use its " +
-                "\"Install SMAPI From Zip\" with the SMAPI-Android zip. Launcher: $SMAPI_LAUNCHER_GITHUB_URL",
+                "from Google Play or the Galaxy Store. Install ModHub Launcher (ModHub's build of the SMAPI " +
+                "Launcher, $SMAPI_LAUNCHER_GITHUB_URL), then use its \"Install SMAPI From Zip\" with the " +
+                "SMAPI-Android zip.",
             url = SMAPI_NEXUS_URL,
             packageNames = listOf(PACKAGE_SMAPI_LAUNCHER),
         )
 
         const val SMAPI_INSTALL_HINT =
-            "Install the SMAPI Launcher APK ($SMAPI_LAUNCHER_GITHUB_URL, see its wiki \"How To Install SMAPI\"), " +
-                "download the SMAPI-Android zip from $SMAPI_NEXUS_URL, open the launcher, tap " +
-                "\"Install SMAPI From Zip\", then \"Start Game\" once so it creates the StardewValley/Mods folder. " +
-                "Avoid APK mirror sites."
+            "Install ModHub Launcher from ModHub's game screen, download the SMAPI-Android zip from " +
+                "$SMAPI_NEXUS_URL, open the launcher and tap \"Install SMAPI From Zip\". Avoid APK mirror sites."
+
+        /** Bridge present, SMAPI not set up inside the launcher yet. */
+        const val BRIDGE_SMAPI_MISSING_HINT =
+            "Install SMAPI inside ModHub Launcher: open the launcher and tap \"Install SMAPI From Zip\" " +
+                "with the SMAPI-Android zip from $SMAPI_NEXUS_URL."
+
+        /** The official SMAPI Launcher is installed, but without ModHub's bridge. */
+        const val LAUNCHER_REPLACE_HINT = "Install ModHub Launcher (replaces SMAPI Launcher, keeps saves)"
+
+        const val BRIDGE_MANAGED_NOTE = "Mods are managed inside ModHub Launcher"
+
+        const val NO_BRIDGE_NOTE =
+            "SMAPI Launcher only loads mods from its private folder; install ModHub Launcher so ModHub can manage them"
 
         private fun isInternalFolder(name: String): Boolean = name.startsWith(STAGING_PREFIX)
 

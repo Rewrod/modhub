@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.selection.selectable
@@ -53,6 +54,8 @@ import com.modhub.app.data.settings.StorageMode
 import com.modhub.app.ui.components.BackButton
 import com.modhub.app.ui.components.openUrl
 import com.modhub.app.ui.components.requestAllFilesAccess
+import com.modhub.app.devtools.GameAssemblyExporter
+import com.modhub.app.ui.screens.settings.AssemblyExport
 import com.modhub.app.ui.screens.settings.KeyCheck
 import com.modhub.app.ui.screens.settings.SettingsViewModel
 
@@ -68,6 +71,8 @@ fun SettingsScreen(onBack: () -> Unit) {
     val mode by viewModel.storageMode.collectAsStateWithLifecycle()
     val folders by viewModel.gameFolders.collectAsStateWithLifecycle()
     val allFiles by viewModel.allFilesAccess.collectAsStateWithLifecycle()
+    val gamePackages by viewModel.gamePackages.collectAsStateWithLifecycle()
+    val assemblyExport by viewModel.assemblyExport.collectAsStateWithLifecycle()
     val context = LocalContext.current
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.onResume() }
 
@@ -186,6 +191,47 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
             item { HorizontalDivider(Modifier.padding(top = 8.dp)) }
 
+            // ------------------------------------------------------------ Developer
+            item { SectionTitle("Developer") }
+            if (gamePackages.isEmpty()) {
+                item {
+                    ListItem(
+                        headlineContent = { Text(EXPORT_ASSEMBLIES_TITLE, color = MaterialTheme.colorScheme.outline) },
+                        supportingContent = { Text("Stardew Valley is not installed.") },
+                    )
+                }
+            }
+            gamePackages.forEach { game ->
+                item(key = "export-${game.packageName}") {
+                    val running = assemblyExport is AssemblyExport.Running
+                    val mine = when (val e = assemblyExport) {
+                        is AssemblyExport.Running -> e.packageName == game.packageName
+                        is AssemblyExport.Done -> e.packageName == game.packageName
+                        is AssemblyExport.Failed -> e.packageName == game.packageName
+                        AssemblyExport.Idle -> false
+                    }
+                    ListItem(
+                        modifier = Modifier.clickable(enabled = !running) { viewModel.exportGameAssemblies(game.packageName) },
+                        headlineContent = { Text(EXPORT_ASSEMBLIES_TITLE) },
+                        supportingContent = {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    "${game.label} ${game.versionName}: zips " +
+                                        GameAssemblyExporter.REQUIRED_DLLS.joinToString() +
+                                        " from your installed game and opens the share sheet. Needed as compile " +
+                                        "references to build the ModHub Launcher; don't redistribute them.",
+                                )
+                                if (mine) AssemblyExportLine(assemblyExport)
+                            }
+                        },
+                        trailingContent = {
+                            if (running && mine) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                        },
+                    )
+                }
+            }
+            item { HorizontalDivider(Modifier.padding(top = 8.dp)) }
+
             // ------------------------------------------------------------ About
             item { SectionTitle("About") }
             item {
@@ -207,6 +253,22 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+private const val EXPORT_ASSEMBLIES_TITLE = "Export game assemblies (for launcher build)"
+
+@Composable
+private fun AssemblyExportLine(state: AssemblyExport) {
+    when (state) {
+        AssemblyExport.Idle -> Unit
+        is AssemblyExport.Running -> Text("${state.step}...", style = MaterialTheme.typography.bodySmall)
+        is AssemblyExport.Done -> Text(
+            "Exported ${state.fileName}. Tap to export and share again.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        is AssemblyExport.Failed -> Text(state.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
     }
 }
 

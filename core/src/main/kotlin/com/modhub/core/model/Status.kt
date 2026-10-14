@@ -19,7 +19,12 @@ sealed interface LoaderStatus {
     val requirement: LoaderRequirement
 
     data class Installed(override val requirement: LoaderRequirement, val version: String? = null) : LoaderStatus
-    data class Outdated(override val requirement: LoaderRequirement, val version: String?) : LoaderStatus
+    /** Present but too old or the wrong variant; [hint] says what to do about it. */
+    data class Outdated(
+        override val requirement: LoaderRequirement,
+        val version: String?,
+        val hint: String? = null,
+    ) : LoaderStatus
     data class Missing(override val requirement: LoaderRequirement, val hint: String? = null) : LoaderStatus
     /** Could not determine (e.g. the needed folder is not readable with the current storage backend). */
     data class Unknown(override val requirement: LoaderRequirement, val reason: String) : LoaderStatus

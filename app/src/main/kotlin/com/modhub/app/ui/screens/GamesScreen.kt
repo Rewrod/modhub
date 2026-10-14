@@ -103,7 +103,11 @@ private fun GameCard(row: GameRow, onClick: () -> Unit, onPlay: () -> Unit) {
                     IconButton(onClick = onPlay) {
                         Icon(
                             Icons.Filled.PlayArrow,
-                            contentDescription = if (target.modded) "Play ${row.name} (modded)" else "Play ${row.name} (unmodded)",
+                            contentDescription = when {
+                                target.needsLoaderSetup -> "Set up SMAPI for ${row.name} in the launcher"
+                                target.modded -> "Play ${row.name} (modded)"
+                                else -> "Play ${row.name} (unmodded)"
+                            },
                             tint = MaterialTheme.colorScheme.primary,
                         )
                     }
@@ -139,6 +143,7 @@ internal fun StatusChips(status: GameStatus) {
     val folderOk = d.modsDirectoryAccessible && status.storage.usable
     StatusChip(
         when {
+            folderOk && status.bridgeActive -> "Mods in ModHub Launcher"
             folderOk -> "Mods folder OK"
             status.restrictedPath -> "Mods folder needs Shizuku"
             !status.storage.usable -> "No storage access"

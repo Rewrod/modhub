@@ -26,6 +26,7 @@ class StorageBackendProvider @Inject constructor(
     @ApplicationContext private val context: Context,
     private val settings: SettingsRepository,
     private val packages: AndroidPackageInspector,
+    private val bridgeClient: BridgeClient,
 ) {
     val fileBackend = AndroidFileStorageBackend()
     val shizukuBackend = ShizukuStorageBackend()
@@ -62,8 +63,44 @@ class StorageBackendProvider @Inject constructor(
     /**
      * Like [gameContext], but also returns the [StorageChoice] (backend + human-readable reason)
      * and the target path it was chosen for, so the UI can explain storage problems.
+     *
+     * If the plugin has a loader bridge ([GamePlugin.loaderBridgeAuthority]) and it answers,
+     * mods are managed through it ([BridgeStorageBackend], mods dir [BridgeStorageBackend.MODS_ROOT]);
+     * the user's path override is ignored then. Otherwise this is [resolveLegacy].
      */
     suspend fun resolve(plugin: GamePlugin): ResolvedStorage {
+        val authority = plugin.loaderBridgeAuthority ?: return resolveLegacy(plugin)
+        if (!bridgeClient.isAvailable(authority)) return resolveLegacy(plugin).copy(bridgeAuthority = authority)
+        val info = bridgeClient.info(authority)
+        val problem = when {
+            info == null -> "ModHub Launcher is installed but refused ModHub's requests" +
+                (bridgeClient.lastError(authority)?.let { " ($it)" } ?: "") +
+                ". Both apps must come from the same ModHub release (same signing key). " +
+                "If you installed the launcher after ModHub, reinstall ModHub."
+            !info.supported -> "ModHub Launcher uses a newer bridge (v${info.bridgeVersion}) than this ModHub " +
+                "understands. Update ModHub."
+            else -> null
+        }
+        if (info == null || problem != null) {
+            return resolveLegacy(plugin).copy(bridgeAuthority = authority, bridgeProblem = problem)
+        }
+        val backend = BridgeStorageBackend(context, bridgeClient, authority)
+        val ext = AndroidFileStorageBackend.externalStorageRoot
+        val modsDir = BridgeStorageBackend.MODS_ROOT
+        return ResolvedStorage(
+            context = GameContext(backend, packages, modsDir, ext, info.toLoaderBridgeInfo()),
+            choice = StorageChoice(backend, BRIDGE_REASON, true),
+            target = modsDir,
+            bridge = info,
+            bridgeAuthority = authority,
+        )
+    }
+
+    /**
+     * Path-based resolution (no bridge): the user's override, else the plugin's default folder,
+     * with a backend picked by [choose]. Also used to read the old folder when migrating to the bridge.
+     */
+    suspend fun resolveLegacy(plugin: GamePlugin): ResolvedStorage {
         val game = settings.currentGameSettings(plugin.id)
         val mode = settings.current().storageMode
         val ext = AndroidFileStorageBackend.externalStorageRoot
@@ -75,7 +112,23 @@ class StorageBackendProvider @Inject constructor(
         val choice = choose(target, mode, game)
         return ResolvedStorage(GameContext(choice.backend, packages, game.modsPathOverride, ext), choice, target)
     }
+
+    companion object {
+        const val BRIDGE_REASON = "ModHub Launcher bridge"
+    }
 }
 
 /** Result of [StorageBackendProvider.resolve]. */
-data class ResolvedStorage(val context: GameContext, val choice: StorageChoice, val target: StoragePath)
+data class ResolvedStorage(
+    val context: GameContext,
+    val choice: StorageChoice,
+    val target: StoragePath,
+    /** Set when mods are managed through the loader bridge. */
+    val bridge: BridgeInfo? = null,
+    /** The plugin's bridge authority, if it has one (whether or not the bridge is installed). */
+    val bridgeAuthority: String? = null,
+    /** Why an installed bridge can't be used (signature mismatch, newer contract). */
+    val bridgeProblem: String? = null,
+) {
+    val bridgeActive: Boolean get() = bridge != null
+}

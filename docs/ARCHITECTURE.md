@@ -9,9 +9,9 @@ platform constraints this design answers to.
 | Module | Type | Contents |
 |---|---|---|
 | `:core` | Pure Kotlin/JVM (`java-library` + `kotlin("jvm")`), no Android | Contracts (`GamePlugin`, `ModSource`, `StorageBackend`), models, `ZipExtractor`, `ModInstaller`, `PluginRegistry`, `SourceRegistry`, `FileStorageBackend`. Unit-tested on the JVM. |
-| `:game-stardew` | Android library | Stardew Valley `GamePlugin` (SMAPI for Android): detection, install (multi-mod archives), enable/disable via leading `.`, uninstall, `dependencyReport()` for missing/outdated SMAPI dependencies. Implemented and unit-tested. |
+| `:game-stardew` | Android library | Stardew Valley `GamePlugin` (SMAPI for Android): detection (bridge mode via ModHub Launcher, or legacy shared-storage paths), install (multi-mod archives), enable/disable via leading `.`, uninstall, `dependencyReport()` for missing/outdated SMAPI dependencies. Implemented and unit-tested. |
 | `:source-nexus` | Android library | Nexus Mods v1 `ModSource` (OkHttp + kotlinx-serialization): latest/trending lists, client-side filter (`SEARCH_NOTE`), files, Premium downloads and `nxm://` (`NxmLink`) downloads, `validateKey()`, `rateLimit`. Also `LocalFileSource` (install from a picked file). Implemented and unit-tested. |
-| `:app` | Android application | Hilt, Compose/Material3 UI, Navigation, DataStore settings, Room provenance DB, Android storage backends (File / SAF / Shizuku stub), the `ModRepository` use-case layer, `DownloadManager`, DI that collects plugins and sources. |
+| `:app` | Android application | Hilt, Compose/Material3 UI, Navigation, DataStore settings, Room provenance DB, Android storage backends (ModHub Launcher bridge / File / SAF / Shizuku stub), the `ModRepository` use-case layer, `DownloadManager`, `GameLauncher` + `LauncherInstaller`, DI that collects plugins and sources. |
 
 Dependency direction: `:app` -> `:game-*`, `:source-*` -> `:core`. Plugins and sources
 never depend on each other or on `:app`. Anything Android-specific a plugin needs
@@ -42,12 +42,16 @@ Every call takes a `GameContext`, built fresh by the app
 - `storage: StorageBackend`: the backend chosen for this game's mods dir. **All file I/O
   goes through it**, never `java.io.File`, so the plugin works unchanged under SAF/Shizuku.
 - `packages: PackageInspector`: installed/versionName lookups.
-- `modsDirectoryOverride: StoragePath?`: user override from Settings; must win.
+- `modsDirectoryOverride: StoragePath?`: user override from Settings (or `/Mods` in bridge mode); must win.
 - `externalStorageRoot`: normally `/storage/emulated/0`.
+- `loaderBridge: LoaderBridgeInfo?`: set when the game's loader launcher bridge is active (launcher version,
+  `smapiInstalled`, `smapiVersion`, `gameInstalled`). Plugins report loader status from it instead of guessing
+  from packages and paths. Null = legacy path-based storage.
 
 Key members: `id`, `displayName`, `packageNames`, `launchPackageNames` (what "Play" tries, loader
 launcher first; defaults to `packageNames`), `loaderRequirements`,
-`sourceGameKeys` (e.g. `"nexus" to "stardewvalley"`), `supportsLoadOrder`,
+`sourceGameKeys` (e.g. `"nexus" to "stardewvalley"`), `supportsLoadOrder`, `loaderBridgeAuthority` (a loader
+launcher's bridge ContentProvider, default null; Stardew: `abc.smapi.gameloader.modhub`),
 `defaultModsDirectories()`, `modsDirectory()` (default impl: override, else first
 existing candidate, else first candidate), `detect()`, `installMod()` (returns a *list*,
 since one archive can hold several mods), `listInstalled()`, `setEnabled()`,
@@ -103,12 +107,29 @@ Backends map it onto real storage:
 
 | Backend | Module | Reaches | Needs |
 |---|---|---|---|
+| `BridgeStorageBackend` (id `bridge`) | `:app` | the loader launcher's private `files/Mods` (ModHub Launcher: `Android/data/abc.smapi.gameloader/files/Mods`), mounted at `StoragePath("/Mods")` | ModHub Launcher installed, same signing key as ModHub (signature permission `abc.smapi.gameloader.permission.MODHUB_BRIDGE`) |
 | `FileStorageBackend` | `:core` | anything the process can read/write | nothing (tests use a temp root) |
 | `AndroidFileStorageBackend` | `:app` | shared storage, e.g. `/sdcard/StardewValley/Mods` | All files access (API 30+) or legacy permissions (26-29). **Not** `Android/data`, `Android/obb` |
 | `SafStorageBackend` | `:app` | one user-picked tree, mounted at a `StoragePath` | a persisted `ACTION_OPEN_DOCUMENT_TREE` grant. Can't pick `Android/data`, the storage root or `Download` on 11+ |
 | `ShizukuStorageBackend` | `:app` | everything shell can reach, including `Android/data/<pkg>` | Shizuku running + permission. **Stub, not implemented** |
 
 ### Choosing a storage backend
+
+`StorageBackendProvider.resolve(plugin)` first checks the plugin's `loaderBridgeAuthority`: if
+`BridgeClient.isAvailable()` (the provider resolves; visible on 11+ through the app manifest's
+`<queries><provider android:authorities="abc.smapi.gameloader.modhub"/></queries>`) and `BridgeClient.info()`
+answers with a supported `bridgeVersion`, the `GameContext` gets `BridgeStorageBackend`,
+`modsDirectoryOverride = /Mods` and `loaderBridge`, with reason "ModHub Launcher bridge". The user's path
+override is ignored while the bridge is active. If the provider exists but refuses calls (signing key mismatch)
+or speaks a newer contract, `ResolvedStorage.bridgeProblem` explains it and resolution falls back to
+`resolveLegacy(plugin)`, the path-based logic below.
+
+`BridgeStorageBackend` maps `StoragePath("/Mods/Foo")` to bridge path `Mods/Foo` and implements every
+`StorageBackend` call with `ContentResolver.call(content://abc.smapi.gameloader.modhub, method, arg, extras)`
+(`exists`/`list`/`mkdirs`/`delete`/`move`) and `openInputStream`/`openOutputStream(uri, "w")` on
+`content://abc.smapi.gameloader.modhub/<path>`, exactly as `docs/BRIDGE.md` specifies. A result `error`, a
+`SecurityException` or a missing provider becomes a `StorageException`. Paths outside `/Mods` read as missing and
+cannot be written. `BridgeClient.info()` is cached for 3 s and invalidated after launches and launcher installs.
 
 `StorageBackendProvider.choose(target, mode, gameSettings)` takes the user's
 `StorageMode` (Settings) and returns a `StorageChoice(backend, reason, usable)`, which
@@ -157,12 +178,13 @@ app/src/main/kotlin/com/modhub/app/
 
 | Call | What it does |
 |---|---|
-| `status(gameId)` | `StorageBackendProvider.resolve()` + `plugin.detect()` -> `GameStatus` (detection, storage choice and its reason, Android/data flag, All-files flag, override). |
+| `status(gameId)` | `StorageBackendProvider.resolve()` + `plugin.detect()` -> `GameStatus` (detection, storage choice and its reason, Android/data flag, All-files flag, override, and `bridge`/`bridgeAuthority`/`bridgeProblem`; `launcherNeeded` = the game has a bridge but it isn't usable). |
 | `snapshot(gameId)` / `observe(gameId, refresh)` | Status + `listInstalled()` + provenance + `DependencyChecker` issues. `observe` re-runs on settings changes, after ModHub changes the folder, and on `refresh`; errors are emitted as `Result.failure` so the flow keeps running. |
 | `setEnabled`, `uninstall` | Plugin calls through a fresh `GameContext`; they also update the provenance table. |
 | `installFromUri(gameId, uri)` | SAF document -> `LocalFileSource.archiveFromStream` (cache) -> `installMod`. Runs as a `DownloadManager` job. |
 | `downloadAndInstall(gameId, file, mod)` | `source.download()` into `cacheDir/downloads/<uuid>/` with progress -> `installMod` with a `ModSourceRef`. Cache folder is deleted afterwards. |
 | `handleNxmLink(uri)` | `NxmLink.parse` -> game by `sourceGameKeys["nexus"]` -> `nexus.fileForNxm` -> download with `link.toDownloadAuth()` -> install. Returns the `GameId` so the UI can open that game. |
+| `migrateLegacyMods(gameId, deleteOriginals)` | Bridge active only. Copies top-level mod folders from the old shared folder (the user's override, else the plugin's non-bridge defaults such as `StardewValley/Mods`; Android/data paths skipped) into the launcher: read through the legacy backend, written through the bridge into a `.modhub-staging-migrate-*` folder, then renamed into place. Folders the launcher already has (case-insensitive, ignoring a leading `.`) are skipped, so a partial or repeated run is safe. Optionally deletes each original after its copy. Runs as a `DownloadManager` job with `installing(done, total)` file counts. `snapshot()` fills `GameSnapshot.legacyMods` with what is left to move. |
 | `useTreeAsModsFolder`, `clearModsFolder` | Persist/release a SAF tree grant and set/clear the per-game override. `treeUriToPath` maps `primary:Foo/Mods` to `/storage/emulated/0/Foo/Mods`. |
 
 Before installing, `ModRepository` refuses when `StorageChoice.usable` is false and explains why, so an
@@ -179,7 +201,22 @@ read. Jobs survive navigation but not process death.
 `GameLauncher` (`platform/`) resolves "Play": the first of `plugin.launchPackageNames` with a
 `getLaunchIntentForPackage` intent becomes a `LaunchTarget(packageName, label, modded)`, where `modded` means the
 package belongs to a `LoaderRequirement` (e.g. the SMAPI Launcher). Every launch package must be in the game
-module's manifest `<queries>`, or Android 11+ hides it.
+module's manifest `<queries>`, or Android 11+ hides it. For a loader launcher with a working bridge, `autoStart`
+makes `launch()` add `modhub.autoStart=true` so ModHub Launcher starts the game at once; if the bridge says
+`smapiInstalled == false`, `needsLoaderSetup` turns "Play" into "Set up SMAPI in launcher", which opens the
+launcher without the extra.
+
+`LauncherInstaller` (`platform/`) downloads `ModHub-Launcher.apk` from `BuildConfig.LAUNCHER_APK_URL` (default
+`https://github.com/Rewrod/modhub/releases/download/latest/ModHub-Launcher.apk`, override with the Gradle property
+`modhub.launcherApkUrl`) into `cacheDir/launcher/` with OkHttp as a `DownloadManager` job, then opens the system
+installer through the app's `FileProvider` (`${applicationId}.fileprovider`, `res/xml/file_paths.xml`,
+`REQUEST_INSTALL_PACKAGES`). ModHub Launcher keeps SMAPILoader's package name and key, so it installs as an
+update over SMAPI Launcher and keeps its data.
+
+**Signing.** The bridge is protected by a signature permission and only accepts the caller package
+`com.modhub.app`, so `app/build.gradle.kts` signs debug and release with the launcher's keystore
+(`launcher/SMAPIGameLoader/debug.keystore`, the upstream public debug key) and the debug build has no
+`applicationIdSuffix`.
 
 `DependencyChecker` keeps the UI game-agnostic: `check(mods) -> List<DependencyIssue>`. The Stardew
 implementation adapts `StardewPlugin.dependencyReport(mods)`. A game with no checker shows no warnings.
@@ -188,9 +225,12 @@ implementation adapts `StardewPlugin.dependencyReport(mods)`. A game with no che
 
 - **Games**: every registered plugin with chips for game installed / loader status / mods folder, plus a
   play icon when a launch target exists. Re-checks on resume.
-- **Game detail**: detection header with "Play (modded)" (filled, via the loader) or "Play (unmodded)"
-  (tonal, plain game) and a matching top-bar play action; both are disabled with "Finish installing first"
-  while one of the game's jobs is running. Storage reason, "Fix storage access" (All files access on 11+, legacy
+- **Game detail**: detection header with "Play (modded)" (filled, via the loader), "Set up SMAPI in launcher"
+  (bridge present, SMAPI not installed in it) or "Play (unmodded)" (tonal, plain game) and a matching top-bar
+  play action; both are disabled with "Finish installing first" while one of the game's jobs is running.
+  "Install ModHub Launcher" card while the bridge is missing or unusable (shows `bridgeProblem`). "N mods found in
+  the old folder" card with "Move them into the launcher" (confirm dialog with "Delete the old copies afterwards")
+  while the bridge is active and the old folder still has mods. In bridge mode the storage buttons are hidden. Storage reason, "Fix storage access" (All files access on 11+, legacy
   runtime permission on 8-10), "Choose mods folder" (SAF `OpenDocumentTree`, persisted grant + override),
   Android/data notice (explains why Shizuku is needed), installed mods with enable switch, version, author,
   dependency warnings, overflow -> uninstall (confirm dialog). FAB menu: Install from file
@@ -217,6 +257,9 @@ links show a dialog.
 - `:core`, `:game-stardew`, `:source-nexus` have JVM unit tests; `scripts/*-test-offline.sh` run them with a
   bare `kotlinc` + JUnit 4 where Maven is unreachable. Normal runs: `./gradlew :core:test
   :game-stardew:testDebugUnitTest :source-nexus:testDebugUnitTest`.
+- Bridge mode (`LoaderBridgeInfo` detection, install/list/toggle under `/Mods`) is covered by `StardewPluginTest`
+  with a fake context. `BridgeStorageBackend`, `BridgeClient`, migration and `LauncherInstaller` have no tests and
+  have never talked to a real launcher.
 - `:app` has **not been built with Gradle** (the authoring sandbox has no Android SDK or Maven access).
   Its non-Compose code (domain, ViewModels, DI modules, storage provider) was type-checked with `kotlinc`
   against small hand-written stubs of the Android/Hilt/lifecycle APIs it uses; the Compose screens were

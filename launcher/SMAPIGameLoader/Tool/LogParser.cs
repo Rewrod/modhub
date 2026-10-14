@@ -72,7 +72,7 @@ internal static class LogParser
             clipboardString.AppendLine($"### Current App Info");
             clipboardString.AppendLine($"> Game {StardewApkTool.CurrentGameVersion}");
             var appBuildCode = ApkTool.LauncherBuildCode;
-            clipboardString.AppendLine($"> Launcher {ApkTool.AppVersion} - {appBuildCode}");
+            clipboardString.AppendLine($"> Launcher {AppInfo.VersionString} - {appBuildCode}");
             clipboardString.AppendLine($"> SMAPI {SMAPIInstaller.GetCurrentVersion()} - {SMAPIInstaller.GetBuildCode()}");
 
             await Clipboard.SetTextAsync(clipboardString.ToString());

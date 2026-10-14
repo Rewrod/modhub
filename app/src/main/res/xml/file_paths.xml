@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider paths (AndroidManifest.xml): the downloaded launcher APK (LauncherInstaller) and
+     developer exports such as game-assemblies-*.zip (devtools/GameAssemblyExporter). -->
+<paths>
+    <cache-path name="launcher" path="launcher/" />
+    <cache-path name="devtools" path="devtools/" />
+</paths>

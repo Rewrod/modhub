@@ -75,21 +75,36 @@ object ZipExtractor {
      * @param pathMapper maps each safe relative entry path to the relative path to write,
      *   or null to skip it. Plugins use this to strip wrapper folders or pick sub-mods.
      *   The mapped path is re-validated, so a mapper cannot introduce zip slip either.
+     * @param totalEntries number of files expected to be written (e.g. from a prior listing),
+     *   passed through to [progress] as `total`; 0 when unknown.
+     * @param progress called after each file is written with (files done, total, relative path).
      */
     suspend fun extract(
         input: InputStream,
         storage: StorageBackend,
         destination: StoragePath,
         limits: Limits = Limits(),
+        totalEntries: Int? = null,
+        progress: ((done: Int, total: Int, path: String) -> Unit)? = null,
         pathMapper: (String) -> String? = { it },
     ): ExtractResult {
         val files = mutableListOf<String>()
         val dirs = mutableListOf<String>()
         var total = 0L
         var count = 0
+        val expected = totalEntries ?: 0
         storage.mkdirs(destination)
+        // Directories known to exist, so we don't hit the (slow, on FUSE) filesystem per file.
+        val createdDirs = HashSet<StoragePath>()
+        createdDirs += destination
+        suspend fun ensureDir(dir: StoragePath) {
+            if (dir in createdDirs) return
+            storage.mkdirs(dir)
+            var p: StoragePath? = dir
+            while (p != null && p.isWithin(destination) && createdDirs.add(p)) p = p.parent
+        }
         ZipInputStream(input).use { zip ->
-            val buf = ByteArray(64 * 1024)
+            val buf = ByteArray(BUFFER_SIZE)
             while (true) {
                 val e = zip.nextEntry ?: break
                 if (++count > limits.maxEntries) throw ArchiveTooLargeException("More than ${limits.maxEntries} entries")
@@ -101,10 +116,10 @@ object ZipExtractor {
                 val target = destination.resolve(rel)
                 if (!target.isWithin(destination)) throw ZipSlipException(e.name) // belt and braces
                 if (e.isDirectory) {
-                    storage.mkdirs(target)
+                    ensureDir(target)
                     dirs += rel
                 } else {
-                    target.parent?.let { storage.mkdirs(it) }
+                    target.parent?.let { ensureDir(it) }
                     storage.openWrite(target).use { out ->
                         while (true) {
                             val n = zip.read(buf)
@@ -117,11 +132,15 @@ object ZipExtractor {
                         }
                     }
                     files += rel
+                    progress?.invoke(files.size, expected, rel)
                 }
             }
         }
         return ExtractResult(destination, files, dirs, total)
     }
+
+    /** Copy buffer; large to cut per-write overhead on FUSE-backed shared storage. */
+    const val BUFFER_SIZE = 256 * 1024
 
     private fun isJunk(path: String): Boolean =
         path == "__MACOSX" || path.startsWith("__MACOSX/") ||

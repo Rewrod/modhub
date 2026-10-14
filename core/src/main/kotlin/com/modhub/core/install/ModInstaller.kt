@@ -40,7 +40,11 @@ class ModInstaller(
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
-    /** Decides the target folder name and the entry → path mapping without writing anything. */
+    /**
+     * Decides the target folder name and the entry → path mapping without writing anything.
+     * This is the one full pass over the archive's entry list; pass the result to [install]
+     * to avoid reading the archive again.
+     */
     fun plan(archive: ModArchive, options: InstallOptions = InstallOptions()): InstallPlan {
         val entries = archive.open().use { ZipExtractor.listEntries(it, options.limits) }
         if (entries.none { !it.isDirectory }) throw StorageException("Archive '${archive.fileName}' contains no files")
@@ -48,11 +52,16 @@ class ModInstaller(
         val folder = options.folderName
             ?: singleRoot
             ?: archive.fileName.substringBeforeLast('.').ifBlank { "mod" }
-        val sanitized = ZipExtractor.safeEntryPath(folder)
-        require(sanitized.isNotEmpty() && !sanitized.contains('/')) { "Invalid mod folder name: '$folder'" }
-        return InstallPlan(folderName = sanitized, stripPrefix = singleRoot, entries = entries)
+        return InstallPlan(folderName = sanitizeFolderName(folder), stripPrefix = singleRoot, entries = entries)
     }
 
+    /**
+     * Extracts [archive] into `<modsDirectory>/<folder>`.
+     *
+     * @param plan result of [plan] for this archive; when given the archive is not listed again.
+     *   [InstallOptions.folderName], if set, still overrides the plan's folder name.
+     * @param progress receives (files written, total files, path) during extraction.
+     */
     suspend fun install(
         archive: ModArchive,
         storage: StorageBackend,
@@ -60,17 +69,38 @@ class ModInstaller(
         gameId: GameId,
         source: ModSourceRef? = null,
         options: InstallOptions = InstallOptions(),
+        plan: InstallPlan? = null,
+        progress: InstallProgress? = null,
     ): InstalledMod {
-        val plan = plan(archive, options)
-        val target = modsDirectory.resolve(plan.folderName)
+        val effectivePlan = when {
+            plan == null -> {
+                progress?.onPhase(InstallProgress.Phase.SCANNING)
+                progress?.onProgress(0, 0, null)
+                plan(archive, options)
+            }
+            options.folderName != null -> plan.copy(folderName = sanitizeFolderName(options.folderName))
+            else -> plan
+        }
+        val target = modsDirectory.resolve(effectivePlan.folderName)
         if (storage.exists(target) && !options.replaceExisting) throw ModAlreadyInstalledException(target)
 
+        val totalFiles = effectivePlan.fileCount
+        progress?.onPhase(InstallProgress.Phase.EXTRACTING)
+        progress?.onProgress(0, totalFiles, null)
+
         storage.mkdirs(modsDirectory)
-        val staging = modsDirectory.resolve(".modhub-staging-${plan.folderName}-${clock()}")
+        val staging = modsDirectory.resolve(".modhub-staging-${effectivePlan.folderName}-${clock()}")
         try {
             archive.open().use { input ->
-                ZipExtractor.extract(input, storage, staging, options.limits) { path ->
-                    val prefix = plan.stripPrefix
+                ZipExtractor.extract(
+                    input,
+                    storage,
+                    staging,
+                    options.limits,
+                    totalEntries = totalFiles,
+                    progress = progress?.let { p -> { done, total, path -> p.onProgress(done, total, path) } },
+                ) { path ->
+                    val prefix = effectivePlan.stripPrefix
                     when {
                         prefix == null -> path
                         path == prefix -> null
@@ -86,9 +116,9 @@ class ModInstaller(
         }
 
         return InstalledMod(
-            id = plan.folderName,
+            id = effectivePlan.folderName,
             gameId = gameId,
-            name = plan.folderName,
+            name = effectivePlan.folderName,
             version = source?.version,
             location = target,
             enabled = true,
@@ -98,12 +128,21 @@ class ModInstaller(
         )
     }
 
+    private fun sanitizeFolderName(folder: String): String {
+        val sanitized = ZipExtractor.safeEntryPath(folder)
+        require(sanitized.isNotEmpty() && !sanitized.contains('/')) { "Invalid mod folder name: '$folder'" }
+        return sanitized
+    }
+
     data class InstallPlan(
         val folderName: String,
         /** Top-level folder stripped from entry paths, or null if none. */
         val stripPrefix: String?,
         val entries: List<ArchiveEntry>,
-    )
+    ) {
+        /** Number of files (not directories) extraction will write. */
+        val fileCount: Int get() = entries.count { !it.isDirectory }
+    }
 
     companion object {
         /** Returns the single top-level folder name if every entry is inside it, else null. */

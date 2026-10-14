@@ -1,5 +1,6 @@
 package com.modhub.core.plugin
 
+import com.modhub.core.install.InstallProgress
 import com.modhub.core.install.ModArchive
 import com.modhub.core.model.GameDetection
 import com.modhub.core.model.GameId
@@ -48,6 +49,14 @@ interface GamePlugin {
     /** Android package names of the game (store variants, launchers). First = preferred. */
     val packageNames: List<String>
 
+    /**
+     * Packages to try when the user taps "Play", in preference order: a mod loader's
+     * launcher first (so mods load), then the plain game. The app launches the first one
+     * that has a launch intent. A package listed in a [LoaderRequirement.packageNames] counts
+     * as a "modded" launch. All of them must be in the plugin's manifest `<queries>`.
+     */
+    val launchPackageNames: List<String> get() = packageNames
+
     /** Loaders/prerequisites (e.g. SMAPI for Android). Empty if mods work without one. */
     val loaderRequirements: List<LoaderRequirement>
 
@@ -81,11 +90,15 @@ interface GamePlugin {
     /** Checks game install, loader status and mods dir reachability. Must not throw for "not found". */
     suspend fun detect(context: GameContext): GameDetection
 
-    /** Installs a downloaded archive into the mods directory and returns what was installed. */
+    /**
+     * Installs a downloaded archive into the mods directory and returns what was installed.
+     * [progress], if given, receives file counts while the archive is extracted.
+     */
     suspend fun installMod(
         context: GameContext,
         archive: ModArchive,
         source: ModSourceRef? = null,
+        progress: InstallProgress? = null,
     ): List<InstalledMod>
 
     /** Scans the mods directory. */

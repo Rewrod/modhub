@@ -45,12 +45,16 @@ Every call takes a `GameContext`, built fresh by the app
 - `modsDirectoryOverride: StoragePath?`: user override from Settings; must win.
 - `externalStorageRoot`: normally `/storage/emulated/0`.
 
-Key members: `id`, `displayName`, `packageNames`, `loaderRequirements`,
+Key members: `id`, `displayName`, `packageNames`, `launchPackageNames` (what "Play" tries, loader
+launcher first; defaults to `packageNames`), `loaderRequirements`,
 `sourceGameKeys` (e.g. `"nexus" to "stardewvalley"`), `supportsLoadOrder`,
 `defaultModsDirectories()`, `modsDirectory()` (default impl: override, else first
 existing candidate, else first candidate), `detect()`, `installMod()` (returns a *list*,
 since one archive can hold several mods), `listInstalled()`, `setEnabled()`,
 `uninstall()`, `getLoadOrder()`, `setLoadOrder()`.
+
+`installMod(..., progress: InstallProgress?)` reports `onProgress(done, total, path)` file counts
+(`total == 0` = still scanning) and optional `onPhase(SCANNING/EXTRACTING/FINALIZING)`.
 
 `ModInstaller` is the shared helper for the common case (unzip into one folder, strip
 a single wrapper folder, stage then move into place). Plugins with special layouts call
@@ -166,17 +170,27 @@ install never half-fails inside the plugin.
 
 `DownloadManager` (singleton) runs jobs in an app-wide `SupervisorJob` scope, exposes
 `StateFlow<List<ActiveDownload>>` (state, bytes, total, error, help URL) and a `SharedFlow<DownloadEvent>`,
-and supports `cancel(id)`/`dismiss(id)`. Cancelling collection of `ModSource.download()` aborts the HTTP
+and supports `cancel(id)`/`dismiss(id)`. During `INSTALLING`, `ActiveDownload.installDone/installTotal`
+come from the plugin's `InstallProgress` (forwarded by `ModRepository`, throttled to every 25 files and the
+last one) and `fraction` switches to file counts (null = indeterminate while the total is unknown);
+`installStartedAt` drives the "Large mods can take a few minutes" hint after 20 s. Cancelling collection of `ModSource.download()` aborts the HTTP
 read. Jobs survive navigation but not process death.
+
+`GameLauncher` (`platform/`) resolves "Play": the first of `plugin.launchPackageNames` with a
+`getLaunchIntentForPackage` intent becomes a `LaunchTarget(packageName, label, modded)`, where `modded` means the
+package belongs to a `LoaderRequirement` (e.g. the SMAPI Launcher). Every launch package must be in the game
+module's manifest `<queries>`, or Android 11+ hides it.
 
 `DependencyChecker` keeps the UI game-agnostic: `check(mods) -> List<DependencyIssue>`. The Stardew
 implementation adapts `StardewPlugin.dependencyReport(mods)`. A game with no checker shows no warnings.
 
 ### Screens
 
-- **Games**: every registered plugin with chips for game installed / loader status / mods folder. Re-checks
-  on resume.
-- **Game detail**: detection header, storage reason, "Fix storage access" (All files access on 11+, legacy
+- **Games**: every registered plugin with chips for game installed / loader status / mods folder, plus a
+  play icon when a launch target exists. Re-checks on resume.
+- **Game detail**: detection header with "Play (modded)" (filled, via the loader) or "Play (unmodded)"
+  (tonal, plain game) and a matching top-bar play action; both are disabled with "Finish installing first"
+  while one of the game's jobs is running. Storage reason, "Fix storage access" (All files access on 11+, legacy
   runtime permission on 8-10), "Choose mods folder" (SAF `OpenDocumentTree`, persisted grant + override),
   Android/data notice (explains why Shizuku is needed), installed mods with enable switch, version, author,
   dependency warnings, overflow -> uninstall (confirm dialog). FAB menu: Install from file

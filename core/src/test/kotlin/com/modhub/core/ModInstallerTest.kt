@@ -10,6 +10,8 @@ import com.modhub.core.model.ModSourceRef
 import com.modhub.core.storage.FileStorageBackend
 import com.modhub.core.storage.StoragePath
 import com.modhub.core.util.ZipSlipException
+import com.modhub.core.install.InstallProgress
+import com.modhub.core.install.ModArchive
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.test.Test
@@ -123,5 +125,46 @@ class ModInstallerTest : TempDirTest() {
         assertFailsWith<java.io.IOException> {
             installer.install(ByteArrayModArchive("e.zip", zipOf("Dir/" to "")), storage, modsDir, game)
         }
+    }
+
+    private class CountingArchive(private val inner: ModArchive) : ModArchive by inner {
+        var opens = 0
+        override fun open(): java.io.InputStream {
+            opens++
+            return inner.open()
+        }
+    }
+
+    @Test
+    fun `install reuses a given plan and reports progress`() = runBlocking<Unit> {
+        val storage = FileStorageBackend(tmp)
+        val archive = CountingArchive(
+            ByteArrayModArchive("m.zip", zipOf("M/" to "", "M/a.txt" to "a", "M/b/c.txt" to "c", "M/d.txt" to "d")),
+        )
+        val plan = installer.plan(archive)
+        assertEquals(1, archive.opens)
+        assertEquals(3, plan.fileCount)
+
+        val calls = mutableListOf<Pair<Int, Int>>()
+        val mod = installer.install(
+            archive, storage, modsDir, game,
+            plan = plan,
+            progress = InstallProgress { done, total, _ -> calls += done to total },
+        )
+
+        assertEquals(2, archive.opens, "plan() is the only listing pass; install() only extracts")
+        assertEquals("M", mod.location.name)
+        assertEquals(listOf(0 to 3, 1 to 3, 2 to 3, 3 to 3), calls)
+        assertEquals("c", modsFile("M/b/c.txt").readText())
+    }
+
+    @Test
+    fun `folderName option overrides a given plan`() = runBlocking<Unit> {
+        val storage = FileStorageBackend(tmp)
+        val archive = ByteArrayModArchive("m.zip", zipOf("M/a.txt" to "a"))
+        val plan = installer.plan(archive)
+        val mod = installer.install(archive, storage, modsDir, game, options = InstallOptions(folderName = "Other"), plan = plan)
+        assertEquals("Other", mod.location.name)
+        assertEquals("a", modsFile("Other/a.txt").readText())
     }
 }

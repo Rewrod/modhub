@@ -90,4 +90,36 @@ class ZipExtractorTest : TempDirTest() {
         assertEquals(listOf("A", "A/x"), entries.map { it.path })
         assertTrue(entries[0].isDirectory)
     }
+
+    @Test
+    fun `reports progress after each file`() = runBlocking<Unit> {
+        val storage = FileStorageBackend(tmp)
+        val zip = zipOf("A/" to "", "A/a.txt" to "a", "A/sub/b.txt" to "b", "c.txt" to "c")
+        val calls = mutableListOf<Triple<Int, Int, String>>()
+
+        ZipExtractor.extract(zip.inputStream(), storage, dest, totalEntries = 3, progress = { d, t, p -> calls += Triple(d, t, p) })
+
+        assertEquals(
+            listOf(Triple(1, 3, "A/a.txt"), Triple(2, 3, "A/sub/b.txt"), Triple(3, 3, "c.txt")),
+            calls,
+        )
+        assertEquals("b", File(tmp, "Mods/Target/A/sub/b.txt").readText())
+    }
+
+    @Test
+    fun `creates each parent directory only once`() = runBlocking<Unit> {
+        var mkdirs = 0
+        val storage = object : FileStorageBackend(tmp) {
+            override suspend fun mkdirs(path: StoragePath): Boolean {
+                mkdirs++
+                return super.mkdirs(path)
+            }
+        }
+        val zip = zipOf(*(1..50).map { "A/sub/f$it.txt" to "x" }.toTypedArray())
+
+        val result = ZipExtractor.extract(zip.inputStream(), storage, dest)
+
+        assertEquals(50, result.files.size)
+        assertEquals(2, mkdirs, "destination + A/sub, not one per file")
+    }
 }

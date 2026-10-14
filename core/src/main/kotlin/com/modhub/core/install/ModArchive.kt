@@ -14,7 +14,7 @@ interface ModArchive {
 }
 
 class FileModArchive(val file: File, override val fileName: String = file.name) : ModArchive {
-    override fun open(): InputStream = file.inputStream().buffered()
+    override fun open(): InputStream = file.inputStream().buffered(256 * 1024)
 }
 
 class ByteArrayModArchive(override val fileName: String, private val bytes: ByteArray) : ModArchive {

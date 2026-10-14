@@ -12,10 +12,13 @@ import com.modhub.app.domain.GameSnapshot
 import com.modhub.app.domain.ModRepository
 import com.modhub.app.domain.describe
 import com.modhub.app.domain.kind
+import com.modhub.app.platform.GameLauncher
+import com.modhub.app.platform.LaunchTarget
 import com.modhub.app.ui.navigation.Routes
 import com.modhub.core.model.GameId
 import com.modhub.core.model.InstalledMod
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -29,6 +32,7 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 /** A snackbar message; [actionUrl] adds an "Open" action (e.g. the Nexus files tab). */
@@ -39,6 +43,7 @@ class GameDetailViewModel @Inject constructor(
     savedState: SavedStateHandle,
     private val repository: ModRepository,
     private val downloadManager: DownloadManager,
+    private val launcher: GameLauncher,
 ) : ViewModel() {
 
     val gameId = GameId(savedState.get<String>(Routes.ARG_GAME_ID)?.takeIf { it.isNotBlank() } ?: "unknown")
@@ -51,7 +56,11 @@ class GameDetailViewModel @Inject constructor(
 
     /** Null until the first load finishes. */
     val snapshot: StateFlow<GameSnapshot?> = repository.observe(gameId, refreshes)
-        .onEach { r -> _loadError.value = r.exceptionOrNull()?.let(::describe) }
+        .onEach { r ->
+            _loadError.value = r.exceptionOrNull()?.let(::describe)
+            // Detection re-ran (resume, refresh, install): the game or loader may have appeared.
+            updateLaunchTarget()
+        }
         .filter { it.isSuccess }
         .map { it.getOrThrow() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
@@ -59,6 +68,15 @@ class GameDetailViewModel @Inject constructor(
     val downloads: StateFlow<List<ActiveDownload>> = downloadManager.downloads
         .map { list -> list.filter { it.gameId == gameId } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** What "Play" starts: the mod loader if installed, else the plain game; null hides the button. */
+    private val _launchTarget = MutableStateFlow<LaunchTarget?>(null)
+    val launchTarget: StateFlow<LaunchTarget?> = _launchTarget.asStateFlow()
+
+    /** True while one of this game's downloads/installs is still running ("Play" is disabled). */
+    val installInProgress: StateFlow<Boolean> = downloads
+        .map { list -> list.any { !it.isFinished } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     /** Locations of mods with an operation in flight (switch shows disabled). */
     private val _busy = MutableStateFlow<Set<String>>(emptySet())
@@ -94,6 +112,29 @@ class GameDetailViewModel @Inject constructor(
 
     fun refresh() {
         refreshes.tryEmit(Unit)
+        viewModelScope.launch { updateLaunchTarget() }
+    }
+
+    /** Starts the game (through its loader when available). Refused while an install is running. */
+    fun onPlay() {
+        if (downloadManager.downloads.value.any { it.gameId == gameId && !it.isFinished }) {
+            _messages.trySend(UiMessage("Finish installing first"))
+            return
+        }
+        viewModelScope.launch {
+            val target = _launchTarget.value ?: updateLaunchTarget()
+            if (target == null || !launcher.launch(target)) {
+                _messages.send(UiMessage("Couldn't start ${gameName}. Is it still installed?"))
+                updateLaunchTarget()
+            }
+        }
+    }
+
+    private suspend fun updateLaunchTarget(): LaunchTarget? {
+        val plugin = repository.plugin(gameId) ?: return null.also { _launchTarget.value = null }
+        val target = withContext(Dispatchers.IO) { runCatching { launcher.resolve(plugin) }.getOrNull() }
+        _launchTarget.value = target
+        return target
     }
 
     fun setEnabled(mod: InstalledMod, enabled: Boolean) = runOn(mod) {

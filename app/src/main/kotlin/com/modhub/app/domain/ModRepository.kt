@@ -13,6 +13,7 @@ import com.modhub.app.storage.AndroidFileStorageBackend
 import com.modhub.app.storage.StorageBackendProvider
 import com.modhub.app.storage.StorageChoice
 import com.modhub.core.install.FileModArchive
+import com.modhub.core.install.InstallProgress
 import com.modhub.core.install.ModArchive
 import com.modhub.core.model.DownloadProgress
 import com.modhub.core.model.GameDetection
@@ -193,13 +194,19 @@ class ModRepository @Inject constructor(
         invalidate(mod.gameId)
     }
 
-    private suspend fun installArchive(gameId: GameId, archive: ModArchive, source: ModSourceRef?): List<InstalledMod> {
+    private suspend fun installArchive(
+        gameId: GameId,
+        archive: ModArchive,
+        source: ModSourceRef?,
+        reporter: DownloadReporter? = null,
+    ): List<InstalledMod> {
         val plugin = requirePlugin(gameId)
         val resolved = storage.resolve(plugin)
         if (!resolved.choice.usable) {
             throw UserFacingException("Can't write to the mods folder: ${resolved.choice.reason}. Open the game and use \"Fix storage access\".")
         }
-        val installed = plugin.installMod(resolved.context, archive, source)
+        val progress = reporter?.let(::throttledInstallProgress)
+        val installed = plugin.installMod(resolved.context, archive, source, progress)
         val now = System.currentTimeMillis()
         for (mod in installed) {
             runCatching {
@@ -222,6 +229,27 @@ class ModRepository @Inject constructor(
         return installed
     }
 
+    /**
+     * Forwards install file counts to [reporter], at most every [INSTALL_PROGRESS_STEP] files
+     * (plus whenever the total changes and on the last file) so a 10k-file mod doesn't flood
+     * the UI state flow.
+     */
+    private fun throttledInstallProgress(reporter: DownloadReporter): InstallProgress {
+        var lastDone = -1
+        var lastTotal = -1
+        val lock = Any()
+        return InstallProgress { done, total, _ ->
+            synchronized(lock) {
+                val due = total != lastTotal || done == total || done - lastDone >= INSTALL_PROGRESS_STEP
+                if (due) {
+                    lastDone = done
+                    lastTotal = total
+                    reporter.installing(done, total)
+                }
+            }
+        }
+    }
+
     /** Copies a user-picked document into the cache and installs it. Runs as a download job. */
     fun installFromUri(gameId: GameId, uri: Uri): String {
         val name = displayName(uri) ?: uri.lastPathSegment ?: "mod.zip"
@@ -231,7 +259,7 @@ class ModRepository @Inject constructor(
                 localFiles.archiveFromStream(name, input, File(context.cacheDir, "imports"))
             } ?: throw UserFacingException("Could not open $name")
             try {
-                installArchive(gameId, archive, null)
+                installArchive(gameId, archive, null, reporter)
             } finally {
                 (archive as? FileModArchive)?.file?.let { f -> f.delete(); f.parentFile?.delete() }
             }
@@ -266,7 +294,7 @@ class ModRepository @Inject constructor(
             val downloaded = completed ?: throw UserFacingException("Download ended without a file")
             reporter.installing()
             val sourceRef = ModSourceRef(file.sourceId, file.modId, file.id, file.version.ifBlank { null })
-            return installArchive(gameId, FileModArchive(downloaded, dest.name), sourceRef)
+            return installArchive(gameId, FileModArchive(downloaded, dest.name), sourceRef, reporter)
         } finally {
             dir.deleteRecursively()
         }
@@ -342,6 +370,8 @@ class ModRepository @Inject constructor(
     }.getOrNull()
 
     companion object {
+        /** Report install progress at most every this many files. */
+        const val INSTALL_PROGRESS_STEP = 25
         const val EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents"
 
         /**

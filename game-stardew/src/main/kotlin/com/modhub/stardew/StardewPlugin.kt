@@ -1,6 +1,7 @@
 package com.modhub.stardew
 
 import com.modhub.core.install.InstallOptions
+import com.modhub.core.install.InstallProgress
 import com.modhub.core.install.ModArchive
 import com.modhub.core.install.ModInstaller
 import com.modhub.core.model.GameDetection
@@ -36,6 +37,9 @@ class StardewPlugin(
     override val displayName: String = "Stardew Valley"
 
     override val packageNames: List<String> = listOf(PACKAGE_GAME, PACKAGE_SMAPI_LAUNCHER)
+
+    /** SMAPI Launcher first: launching it starts the game with mods loaded. */
+    override val launchPackageNames: List<String> = listOf(PACKAGE_SMAPI_LAUNCHER, PACKAGE_GAME)
 
     override val loaderRequirements: List<LoaderRequirement> = listOf(SMAPI_REQUIREMENT)
 
@@ -125,11 +129,17 @@ class StardewPlugin(
         context: GameContext,
         archive: ModArchive,
         source: ModSourceRef?,
+        progress: InstallProgress?,
     ): List<InstalledMod> {
         val modsDir = modsDirectory(context)
         val storage = context.storage
 
+        // One full listing pass; the plan is reused by install() below.
+        progress?.onPhase(InstallProgress.Phase.SCANNING)
+        progress?.onProgress(0, 0, null)
         val plan = installer.plan(archive)
+        progress?.onProgress(0, plan.fileCount, null)
+        // Partial pass: stops at the root manifest.json entry.
         val folderOverride = if (plan.stripPrefix == null && plan.entries.any { it.path == SmapiManifest.FILE_NAME }) {
             rootManifestName(archive)
                 ?.let { sanitizeFolderName(it) }
@@ -144,7 +154,11 @@ class StardewPlugin(
             gameId = id,
             source = source,
             options = InstallOptions(folderName = folderOverride, replaceExisting = true),
+            plan = plan,
+            progress = progress,
         )
+        progress?.onPhase(InstallProgress.Phase.FINALIZING)
+        progress?.onProgress(plan.fileCount, plan.fileCount, null)
 
         val disabledTwin = modsDir.resolve(DISABLED_PREFIX + installed.location.name)
         if (storage.exists(disabledTwin)) storage.delete(disabledTwin)

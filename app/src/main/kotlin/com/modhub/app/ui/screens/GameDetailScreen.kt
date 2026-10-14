@@ -15,16 +15,20 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -65,6 +69,7 @@ import com.modhub.app.domain.DependencyIssue
 import com.modhub.app.domain.GameSnapshot
 import com.modhub.app.domain.ModRepository
 import com.modhub.app.domain.describe
+import com.modhub.app.platform.LaunchTarget
 import com.modhub.app.ui.components.ANDROID_DATA_EXPLANATION
 import com.modhub.app.ui.components.BackButton
 import com.modhub.app.ui.components.ChipTone
@@ -90,6 +95,8 @@ fun GameDetailScreen(
     val loadError by viewModel.loadError.collectAsStateWithLifecycle()
     val downloads by viewModel.downloads.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
+    val launchTarget by viewModel.launchTarget.collectAsStateWithLifecycle()
+    val installing by viewModel.installInProgress.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
 
@@ -142,6 +149,14 @@ fun GameDetailScreen(
                 title = { Text(viewModel.gameName) },
                 navigationIcon = { BackButton(onBack) },
                 actions = {
+                    launchTarget?.let { target ->
+                        IconButton(onClick = viewModel::onPlay, enabled = !installing) {
+                            Icon(
+                                Icons.Filled.PlayArrow,
+                                contentDescription = if (target.modded) "Play (modded)" else "Play (unmodded)",
+                            )
+                        }
+                    }
                     IconButton(onClick = viewModel::refresh) { Icon(Icons.Filled.Refresh, contentDescription = "Refresh") }
                 },
             )
@@ -207,6 +222,9 @@ fun GameDetailScreen(
                 item(key = "header") {
                     GameHeader(
                         snap = snap,
+                        launchTarget = launchTarget,
+                        installing = installing,
+                        onPlay = viewModel::onPlay,
                         onChooseFolder = { launchFolderPicker() },
                         onAllFilesAccess = fixStorageAccess,
                         onClearOverride = viewModel::clearModsFolder,
@@ -284,6 +302,9 @@ fun GameDetailScreen(
 @Composable
 private fun GameHeader(
     snap: GameSnapshot,
+    launchTarget: LaunchTarget?,
+    installing: Boolean,
+    onPlay: () -> Unit,
     onChooseFolder: () -> Unit,
     onAllFilesAccess: () -> Unit,
     onClearOverride: () -> Unit,
@@ -294,6 +315,7 @@ private fun GameHeader(
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { StatusChips(status) }
+            launchTarget?.let { PlayButton(it, installing, onPlay) }
             d.gameVersion?.let { Text("Game version $it", style = MaterialTheme.typography.bodySmall) }
             Text(
                 "Mods folder: ${status.target}" + if (status.modsPathOverride != null) " (custom)" else "",
@@ -329,6 +351,28 @@ private fun GameHeader(
                 TextButton(onClick = onClearOverride) { Text("Use the default folder again") }
             }
         }
+    }
+}
+
+/** "Play (modded)" (filled, via the loader) or "Play (unmodded)" (tonal, plain game). */
+@Composable
+private fun PlayButton(target: LaunchTarget, installing: Boolean, onPlay: () -> Unit) {
+    val content: @Composable () -> Unit = {
+        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+        Text(if (target.modded) "Play (modded)" else "Play (unmodded)", Modifier.padding(start = ButtonDefaults.IconSpacing))
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (target.modded) {
+            Button(onClick = onPlay, enabled = !installing, modifier = Modifier.fillMaxWidth()) { content() }
+        } else {
+            FilledTonalButton(onClick = onPlay, enabled = !installing, modifier = Modifier.fillMaxWidth()) { content() }
+        }
+        val hint = when {
+            installing -> "Finish installing first"
+            target.modded -> "Starts ${target.label}, which loads your mods"
+            else -> "Mod loader not found; mods won't load"
+        }
+        Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

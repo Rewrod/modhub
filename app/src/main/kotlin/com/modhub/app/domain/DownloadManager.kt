@@ -32,10 +32,25 @@ data class ActiveDownload(
     val error: Throwable? = null,
     /** Web page to send the user to if the download needs a manual step (e.g. Nexus files tab). */
     val helpUrl: String? = null,
+    /** Files written so far while [State.INSTALLING]. */
+    val installDone: Int = 0,
+    /** Files to write while [State.INSTALLING]; 0 = not known yet. */
+    val installTotal: Int = 0,
+    /** Optional short label for the current install step (e.g. a phase or file name). */
+    val installDetail: String? = null,
+    /** When the job entered [State.INSTALLING] (epoch ms), for "this is taking a while" hints. */
+    val installStartedAt: Long? = null,
 ) {
     enum class State { PREPARING, DOWNLOADING, INSTALLING, DONE, FAILED, CANCELLED }
 
-    val fraction: Float? get() = totalBytes?.takeIf { it > 0 }?.let { (bytesRead.toFloat() / it).coerceIn(0f, 1f) }
+    /**
+     * Progress 0..1 for the current phase, or null when indeterminate. While installing this is
+     * files written / total files (never the finished download's fraction).
+     */
+    val fraction: Float? get() = when (state) {
+        State.INSTALLING -> installTotal.takeIf { it > 0 }?.let { (installDone.toFloat() / it).coerceIn(0f, 1f) }
+        else -> totalBytes?.takeIf { it > 0 }?.let { (bytesRead.toFloat() / it).coerceIn(0f, 1f) }
+    }
     val isFinished: Boolean get() = state == State.DONE || state == State.FAILED || state == State.CANCELLED
 }
 
@@ -50,7 +65,11 @@ sealed interface DownloadEvent {
 /** Handle given to a job so it can report what it is doing. */
 interface DownloadReporter {
     fun downloading(bytesRead: Long, totalBytes: Long?)
-    fun installing()
+    /**
+     * Switches to (or updates) the installing phase. [done]/[total] are file counts;
+     * `total == 0` means unknown (indeterminate progress). Safe to call repeatedly.
+     */
+    fun installing(done: Int = 0, total: Int = 0, detail: String? = null)
     fun retitle(title: String)
     fun helpUrl(url: String?)
 }
@@ -85,7 +104,16 @@ class DownloadManager @Inject constructor() {
             override fun downloading(bytesRead: Long, totalBytes: Long?) = edit(id) {
                 it.copy(state = ActiveDownload.State.DOWNLOADING, bytesRead = bytesRead, totalBytes = totalBytes)
             }
-            override fun installing() = edit(id) { it.copy(state = ActiveDownload.State.INSTALLING) }
+            override fun installing(done: Int, total: Int, detail: String?) = edit(id) {
+                if (it.isFinished) return@edit it
+                it.copy(
+                    state = ActiveDownload.State.INSTALLING,
+                    installDone = done,
+                    installTotal = total,
+                    installDetail = detail,
+                    installStartedAt = it.installStartedAt ?: System.currentTimeMillis(),
+                )
+            }
             override fun retitle(title: String) = edit(id) { it.copy(title = title) }
             override fun helpUrl(url: String?) = edit(id) { it.copy(helpUrl = url) }
         }

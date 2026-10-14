@@ -5,6 +5,8 @@ import com.modhub.core.model.LoaderStatus
 import com.modhub.core.model.ModId
 import com.modhub.core.model.ModSourceRef
 import com.modhub.core.storage.StorageException
+import com.modhub.core.install.InstallProgress
+import com.modhub.core.install.ModArchive
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -24,6 +26,7 @@ class StardewPluginTest : StardewTestBase() {
         assertEquals("stardew", plugin.id.value)
         assertEquals("Stardew Valley", plugin.displayName)
         assertEquals(listOf("com.chucklefish.stardewvalley", "abc.smapi.gameloader"), plugin.packageNames)
+        assertEquals(listOf("abc.smapi.gameloader", "com.chucklefish.stardewvalley"), plugin.launchPackageNames)
         assertEquals(mapOf("nexus" to "stardewvalley"), plugin.sourceGameKeys)
         assertFalse(plugin.supportsLoadOrder)
         assertTrue(plugin.loaderRequirements.single().description.contains("Unofficial"))
@@ -292,5 +295,54 @@ class StardewPluginTest : StardewTestBase() {
         assertEquals("2.0.0", outdated.installedVersion)
         assertEquals(StardewPlugin.MissingDependency.Kind.CONTENT_PACK_FOR, outdated.kind)
         assertFalse(report.single { it.missingUniqueId == "me.missing" }.isOutdated)
+    }
+
+    // ------------------------------------------------------------ install progress
+
+    private class CountingArchive(private val inner: ModArchive) : ModArchive by inner {
+        var opens = 0
+        override fun open(): java.io.InputStream {
+            opens++
+            return inner.open()
+        }
+    }
+
+    @Test
+    fun installReadsArchiveTwiceAndReportsProgress() = runBlocking<Unit> {
+        val zip = zipOf(
+            "Big/manifest.json" to manifestJson("x.Big"),
+            *(1..60).map { "Big/assets/f$it.png" to "p" }.toTypedArray(),
+        )
+        val archive = CountingArchive(ByteArrayModArchive("big.zip", zip))
+        val calls = mutableListOf<Pair<Int, Int>>()
+        val phases = mutableListOf<InstallProgress.Phase>()
+        val progress = object : InstallProgress {
+            override fun onProgress(done: Int, total: Int, currentPath: String?) {
+                calls += done to total
+            }
+            override fun onPhase(phase: InstallProgress.Phase) {
+                phases += phase
+            }
+        }
+
+        plugin.installMod(context(), archive, null, progress)
+
+        assertEquals(2, archive.opens, "one listing pass + one extraction pass")
+        assertEquals(0 to 0, calls.first())
+        assertEquals(61 to 61, calls.last())
+        assertEquals(
+            listOf(InstallProgress.Phase.SCANNING, InstallProgress.Phase.EXTRACTING, InstallProgress.Phase.FINALIZING),
+            phases,
+        )
+        assertTrue(calls.map { it.first }.zipWithNext().all { (a, b) -> b >= a }, "done never goes backwards")
+    }
+
+    @Test
+    fun rootManifestArchiveNeedsOnlyOneExtraPartialPass() = runBlocking<Unit> {
+        val zip = zipOf("manifest.json" to manifestJson("x.Loose", "Loose Mod"), "a.txt" to "a")
+        val archive = CountingArchive(ByteArrayModArchive("loose.zip", zip))
+        val mod = plugin.installMod(context(), archive, null).single()
+        assertEquals("Loose Mod", mod.location.name)
+        assertEquals(3, archive.opens)
     }
 }

@@ -32,6 +32,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -40,6 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.modhub.app.domain.ActiveDownload
 import com.modhub.app.domain.describe
+import kotlinx.coroutines.delay
 import java.util.Locale
 
 enum class ChipTone { OK, WARN, ERROR, NEUTRAL }
@@ -172,7 +178,8 @@ private fun DownloadRow(
                         append("Downloading ").append(formatBytes(d.bytesRead))
                         d.totalBytes?.let { append(" / ").append(formatBytes(it)) }
                     }
-                    ActiveDownload.State.INSTALLING -> "Installing..."
+                    ActiveDownload.State.INSTALLING ->
+                        if (d.installTotal > 0) "Installing\u2026 ${d.installDone}/${d.installTotal} files" else "Installing\u2026"
                     ActiveDownload.State.DONE -> "Installed"
                     ActiveDownload.State.FAILED -> "Failed: " + (d.error?.let(::describe) ?: "unknown error")
                     ActiveDownload.State.CANCELLED -> "Cancelled"
@@ -185,6 +192,9 @@ private fun DownloadRow(
                     maxLines = if (d.state == ActiveDownload.State.FAILED) 4 else 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                if (d.state == ActiveDownload.State.INSTALLING && d.installStartedAt != null) {
+                    SlowInstallHint(d.installStartedAt)
+                }
             }
             if (d.state == ActiveDownload.State.FAILED && d.helpUrl != null) {
                 TextButton(onClick = { onOpenHelp(d.helpUrl) }) { Text("Open page") }
@@ -196,12 +206,36 @@ private fun DownloadRow(
         }
         when {
             d.isFinished -> Unit
-            d.state == ActiveDownload.State.DOWNLOADING && d.fraction != null ->
+            (d.state == ActiveDownload.State.DOWNLOADING || d.state == ActiveDownload.State.INSTALLING) &&
+                d.fraction != null ->
                 LinearProgressIndicator(progress = { d.fraction ?: 0f }, modifier = Modifier.fillMaxWidth())
             else -> LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
     }
 }
+
+/** After [SLOW_INSTALL_HINT_MS] in the installing phase, explains that big mods are slow. */
+@Composable
+private fun SlowInstallHint(startedAt: Long) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val slow = now - startedAt >= SLOW_INSTALL_HINT_MS
+    LaunchedEffect(startedAt, slow) {
+        while (!slow && System.currentTimeMillis() - startedAt < SLOW_INSTALL_HINT_MS) {
+            delay(1_000)
+            now = System.currentTimeMillis()
+        }
+        now = System.currentTimeMillis()
+    }
+    if (slow) {
+        Text(
+            "Large mods can take a few minutes on shared storage.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+private const val SLOW_INSTALL_HINT_MS = 20_000L
 
 fun formatBytes(bytes: Long): String {
     if (bytes < 1024) return "$bytes B"

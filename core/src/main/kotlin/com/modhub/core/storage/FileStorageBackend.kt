@@ -2,6 +2,7 @@ package com.modhub.core.storage
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -48,7 +49,7 @@ open class FileStorageBackend(private val root: File = File("/")) : StorageBacke
     override suspend fun openWrite(path: StoragePath): OutputStream = io {
         val f = toFile(path)
         f.parentFile?.let { if (!it.isDirectory && !it.mkdirs()) throw StorageException("Cannot create ${path.parent}") }
-        FileOutputStream(f)
+        BufferedOutputStream(FileOutputStream(f), WRITE_BUFFER_SIZE)
     }
 
     override suspend fun mkdirs(path: StoragePath): Boolean = io {
@@ -77,4 +78,9 @@ open class FileStorageBackend(private val root: File = File("/")) : StorageBacke
     }
 
     private suspend fun <T> io(block: () -> T): T = withContext(Dispatchers.IO) { block() }
+
+    companion object {
+        /** Each write() through FUSE (/storage/emulated/0) is a syscall round trip; batch them. */
+        const val WRITE_BUFFER_SIZE = 256 * 1024
+    }
 }

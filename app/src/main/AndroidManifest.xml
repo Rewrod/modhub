@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- ===== Storage (see docs/ARCHITECTURE.md "Storage backends") ===== -->
+    <!-- Android 8-10: legacy shared-storage access. -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <!-- Android 11+: "All files access" for shared paths such as /sdcard/StardewValley/Mods.
+         Does NOT cover Android/data or Android/obb (use Shizuku for those).
+         Play policy restricts this permission; intended for GitHub/F-Droid builds. -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <!-- TODO(shizuku): Shizuku's provider/permission entries go here once the dependency is added. -->
+
+    <!-- Game plugins declare <queries> for their packages in their own manifests;
+         they are merged in at build time (needed for package visibility on API 30+). -->
+
+    <application
+        android:name=".ModHubApplication"
+        android:allowBackup="false"
+        android:icon="@drawable/ic_launcher"
+        android:roundIcon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ModHub"
+        android:requestLegacyExternalStorage="true"
+        tools:targetApi="35">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.ModHub">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Nexus "Mod Manager Download" links: nxm://<domain>/mods/<id>/files/<fileId>?key=..&expires=..
+                 MainActivity forwards these to the nav graph (see NavGraph / handleIntent). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="nxm" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
